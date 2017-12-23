@@ -13,29 +13,14 @@
 #ifndef __STOUT_OS_CHDIR_HPP__
 #define __STOUT_OS_CHDIR_HPP__
 
-#include <string>
 
-#include <stout/error.hpp>
-#include <stout/nothing.hpp>
-#include <stout/try.hpp>
-
+// For readability, we minimize the number of #ifdef blocks in the code by
+// splitting platform specific system calls into separate directories.
 #ifdef __WINDOWS__
-#include <stout/windows.hpp> // To be certain we're using the right `chdir`.
+#include <stout/os/windows/chdir.hpp>
+#else
+#include <stout/os/posix/chdir.hpp>
 #endif // __WINDOWS__
-
-
-namespace os {
-
-inline Try<Nothing> chdir(const std::string& directory)
-{
-  if (::chdir(directory.c_str()) < 0) {
-    return ErrnoError();
-  }
-
-  return Nothing();
-}
-
-} // namespace os {
 
 
 #endif // __STOUT_OS_CHDIR_HPP__

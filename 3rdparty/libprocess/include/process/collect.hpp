@@ -57,6 +57,62 @@ template <typename... Ts>
 Future<std::tuple<Future<Ts>...>> await(const Future<Ts>&... futures);
 
 
+// Waits on the future specified and returns after the future has been
+// completed or the await has been discarded. This is useful when
+// wanting to "break out" of a future chain if a discard occurs but
+// the underlying future has not been discarded. For example:
+//
+//   Future<string> foo()
+//   {
+//     return bar()
+//       .then([](int i) {
+//         return stringify(i);
+//       });
+//   }
+//
+//   Future<stringify> future = foo();
+//   future.discard();
+//
+// In the above code we'll propagate the discard to `bar()` but might
+// wait forever if `bar()` can't discard their computation. In some
+// circumstances you might want to break out early and you can do that
+// by using `await`, because if we discard an `await` that function
+// will return even though all of the future's it is waiting on have
+// not been discarded (in other words, the `await` can be properly
+// discarded even if the underlying futures have not been discarded).
+//
+//   Future<string> foo()
+//   {
+//     return await(bar())
+//       .recover([](const Future<Future<string>>& future) {
+//         if (future.isDiscarded()) {
+//           cleanup();
+//         }
+//         return Failure("Discarded waiting");
+//       })
+//       .then([](const Future<int>& future) {
+//         return future
+//           .then([](int i) {
+//             return stringify(i);
+//           });
+//       });
+//   }
+//
+//   Future<string> future = foo();
+//   future.discard();
+//
+// Using `await` will enable you to continue execution even if `bar()`
+// does not (or can not) discard their execution.
+template <typename T>
+Future<Future<T>> await(const Future<T>& future)
+{
+  return await(std::list<Future<T>>{future})
+    .then([=]() {
+      return Future<Future<T>>(future);
+    });
+}
+
+
 namespace internal {
 
 template <typename T>
@@ -76,6 +132,7 @@ public:
     delete promise;
   }
 
+protected:
   virtual void initialize()
   {
     // Stop this nonsense if nobody cares.
@@ -83,17 +140,29 @@ public:
 
     foreach (const Future<T>& future, futures) {
       future.onAny(defer(this, &CollectProcess::waited, lambda::_1));
+      future.onAbandoned(defer(this, &CollectProcess::abandoned));
     }
   }
 
 private:
+  void abandoned()
+  {
+    // There is no use waiting because this future will never complete
+    // so terminate this process which will cause `promise` to get
+    // deleted and our future to also be abandoned.
+    terminate(this);
+  }
+
   void discarded()
   {
-    promise->discard();
-
     foreach (Future<T> future, futures) {
       future.discard();
     }
+
+    // NOTE: we discard the promise after we set discard on each of
+    // the futures so that there is a happens-before relationship that
+    // can be assumed by callers.
+    promise->discard();
 
     terminate(this);
   }
@@ -150,17 +219,29 @@ public:
 
     foreach (const Future<T>& future, futures) {
       future.onAny(defer(this, &AwaitProcess::waited, lambda::_1));
+      future.onAbandoned(defer(this, &AwaitProcess::abandoned));
     }
   }
 
 private:
+  void abandoned()
+  {
+    // There is no use waiting because this future will never complete
+    // so terminate this process which will cause `promise` to get
+    // deleted and our future to also be abandoned.
+    terminate(this);
+  }
+
   void discarded()
   {
-    promise->discard();
-
     foreach (Future<T> future, futures) {
       future.discard();
     }
+
+    // NOTE: we discard the promise after we set discard on each of
+    // the futures so that there is a happens-before relationship that
+    // can be assumed by callers.
+    promise->discard();
 
     terminate(this);
   }

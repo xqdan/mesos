@@ -14,6 +14,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+syntax = "proto2";
+
 import "mesos/mesos.proto";
 import "mesos/quota/quota.proto";
 
@@ -24,11 +26,14 @@ option java_outer_classname = "Protos";
 
 
 // A `Subject` is the entity which desires to execute an `Action` on
-// an `Object`. A `Subject` has a number of optional fields (currently
-// only a `value`).
+// an `Object`. A `Subject` has a number of optional fields:
+//   `value` : String which identifies the subject, i.e., a principal.
+//   `claims`: Key-value pairs associated with the subject.
+//
 // NOTE: A `Subject` should always come with at least one set field.
 message Subject {
   optional string value = 1;
+  optional Labels claims = 2;
 }
 
 
@@ -48,6 +53,9 @@ message Object {
   optional quota.QuotaInfo quota_info = 6;
   optional WeightInfo weight_info = 7;
   optional Resource resource = 8;
+  optional CommandInfo command_info = 9;
+  optional ContainerID container_id = 10;
+  optional MachineID machine_id = 11;
 }
 
 
@@ -153,6 +161,95 @@ enum Action {
   // This action will not fill in any object fields, since the object
   // is the entire set of flags.
   VIEW_FLAGS = 18;
+
+  // This action will always set the `ExecutorInfo`, `FrameworkInfo`, and
+  // `ContainerID` fields and optionally a `CommandInfo` if available.
+  LAUNCH_NESTED_CONTAINER = 19;
+
+  // This action will set objects of type `ExecutorInfo`, `FrameworkInfo`, and
+  // `ContainerID`.
+  KILL_NESTED_CONTAINER = 20;
+
+  // This action will set objects of type `ExecutorInfo`, `FrameworkInfo`, and
+  // `ContainerID`.
+  WAIT_NESTED_CONTAINER = 21;
+
+  // This action will always set the `ExecutorInfo`, `FrameworkInfo`, and
+  // `ContainerID` fields and optionally a `CommandInfo` if available.
+  LAUNCH_NESTED_CONTAINER_SESSION = 22;
+
+  // This action will set objects of type `ExecutorInfo` and `FrameworkInfo`.
+  ATTACH_CONTAINER_INPUT = 23;
+
+  // This action will set objects of type `ExecutorInfo` and `FrameworkInfo`.
+  ATTACH_CONTAINER_OUTPUT = 24;
+
+  // This action will set objects of type `ExecutorInfo` and `FrameworkInfo`.
+  VIEW_CONTAINER = 25;
+
+  // This action will not fill in any object fields, since a principal is
+  // either allowed to change the log level or he is unauthorized.
+  SET_LOG_LEVEL = 26;
+
+  // This action will set objects of type `ExecutorInfo`, `FrameworkInfo`, and
+  // `ContainerID`.
+  REMOVE_NESTED_CONTAINER = 27;
+
+  // This action will not fill in any object fields, since a principal is
+  // either allowed to register as an agent or is unauthorized.
+  REGISTER_AGENT = 28;
+
+  // This action will set objects of type `MachineID`.
+  UPDATE_MAINTENANCE_SCHEDULE = 29;
+
+  // This action will set objects of type `MachineID`.
+  GET_MAINTENANCE_SCHEDULE = 30;
+
+  // This action will set objects of type `MachineID`.
+  START_MAINTENANCE = 31;
+
+  // This action will set objects of type `MachineID`.
+  STOP_MAINTENANCE = 32;
+
+  // This action will set objects of type `MachineID`.
+  GET_MAINTENANCE_STATUS = 33;
+
+  // This action will not fill in any object fields, since a principal is
+  // either allowed to mark an agent as gone or is unauthorized.
+  MARK_AGENT_GONE = 34;
+
+  // This action will not fill in any object fields. A principal is either
+  // allowed to launch standalone containers or is unauthorized.
+  //
+  // TODO(josephw): This should set the operating system user in the object.
+  LAUNCH_STANDALONE_CONTAINER = 35;
+
+  // This action will not fill in any object fields. A principal is either
+  // allowed to kill standalone containers or is unauthorized.
+  //
+  // TODO(josephw): This should set the operating system user in the object.
+  KILL_STANDALONE_CONTAINER = 36;
+
+  // This action will not fill in any object fields. A principal is either
+  // allowed to wait upon standalone containers or is unauthorized.
+  //
+  // TODO(josephw): This should set the operating system user in the object.
+  WAIT_STANDALONE_CONTAINER = 37;
+
+  // This action will not fill in any object fields. A principal is either
+  // allowed to remove standalone containers or is unauthorized.
+  //
+  // TODO(josephw): This should set the operating system user in the object.
+  REMOVE_STANDALONE_CONTAINER = 38;
+
+  // This action will not fill in any object fields. A principal is either
+  // allowed to remove standalone containers or is unauthorized.
+  VIEW_STANDALONE_CONTAINER = 40;
+
+  // This action will not fill in any object fields. A principal is either
+  // allowed to add, update and remove resource provider config files or is
+  // unauthorized.
+  MODIFY_RESOURCE_PROVIDER_CONFIG = 39;
 }
 
 

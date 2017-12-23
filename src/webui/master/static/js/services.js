@@ -1,3 +1,19 @@
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 (function() {
   'use strict';
 
@@ -82,7 +98,7 @@
           ];
         }
 
-        var ModalCtrl = function($scope, $modalInstance) {
+        var ModalCtrl = function($scope, _$modalInstance) {
           $scope.title = title;
           $scope.message = message;
           $scope.buttons = buttons;
@@ -213,7 +229,7 @@
   };
 
   Top.prototype.parseResponse = function(response) {
-    var that = this;
+    var this_ = this;
     var monitor = {
       frameworks: {},
       statistics: new Statistics()
@@ -226,10 +242,10 @@
         Statistics.parseJSON(executor.statistics);
 
       // Compute CPU usage if possible.
-      if (that.scope.monitor &&
-          that.scope.monitor.frameworks[framework_id] &&
-          that.scope.monitor.frameworks[framework_id].executors[executor_id]) {
-        var previous = that.scope.monitor.frameworks[framework_id].executors[executor_id].statistics;
+      if (this_.scope.monitor &&
+          this_.scope.monitor.frameworks[framework_id] &&
+          this_.scope.monitor.frameworks[framework_id].executors[executor_id]) {
+        var previous = this_.scope.monitor.frameworks[framework_id].executors[executor_id].statistics;
         current.diffUsage(previous);
       }
 
@@ -262,15 +278,15 @@
   };
 
   // Arguments:
-  //   host: host of agent.
+  //   url: the URL of the Agent's container statistics endpoint.
   //   scope: $scope service from Angular.
-  Top.prototype.start = function(host, scope) {
+  Top.prototype.start = function(url, scope) {
     if (this.started()) {
       // TODO(bmahler): Consider logging a warning here.
       return;
     }
 
-    this.endpoint = '//' + host + '/monitor/statistics?jsonp=JSON_CALLBACK';
+    this.endpoint = url;
     this.scope = scope;
 
     // Initial poll is immediate.

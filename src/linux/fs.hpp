@@ -21,6 +21,7 @@
 
 #include <sys/mount.h>
 #include <sys/types.h>
+#include <sys/vfs.h>
 
 #include <string>
 #include <vector>
@@ -147,6 +148,28 @@
 #define UMOUNT_NOFOLLOW 8
 #endif
 
+// Define FS_MAGIC_* flags for filesystem types.
+// http://man7.org/linux/man-pages/man2/fstatfs64.2.html
+#define FS_TYPE_AUFS 0x61756673
+#define FS_TYPE_BTRFS 0x9123683E
+#define FS_TYPE_CRAMFS 0x28cd3d45
+#define FS_TYPE_ECRYPTFS 0xf15f
+#define FS_TYPE_EXTFS 0x0000EF53
+#define FS_TYPE_F2FS 0xF2F52010
+#define FS_TYPE_GPFS 0x47504653
+#define FS_TYPE_JFFS2FS 0x000072b6
+#define FS_TYPE_JFS 0x3153464a
+#define FS_TYPE_NFSFS 0x00006969
+#define FS_TYPE_RAMFS 0x858458f6
+#define FS_TYPE_REISERFS 0x52654973
+#define FS_TYPE_SMBFS 0x0000517B
+#define FS_TYPE_SQUASHFS 0x73717368
+#define FS_TYPE_TMPFS 0x01021994
+#define FS_TYPE_VXFS 0xa501fcf5
+#define FS_TYPE_XFS 0x58465342
+#define FS_TYPE_ZFS 0x2fc12fc1
+#define FS_TYPE_OVERLAY 0x794C7630
+
 namespace mesos {
 namespace internal {
 namespace fs {
@@ -154,6 +177,21 @@ namespace fs {
 // Detect whether the given file system is supported by the kernel.
 Try<bool> supported(const std::string& fsname);
 
+
+// Detect whether the given file system supports `d_type`
+// in `struct dirent`.
+// @directory must not be empty for correct `d_type` detection.
+// It is the caller's responsibility to ensure this holds.
+Try<bool> dtypeSupported(const std::string& directory);
+
+
+// Returns a filesystem type id, given a directory.
+// http://man7.org/linux/man-pages/man2/fstatfs64.2.html
+Try<uint32_t> type(const std::string& path);
+
+
+// Returns the filesystem type name, given a filesystem type id.
+Try<std::string> typeName(uint32_t fsType);
 
 // TODO(idownes): These different variations of mount information
 // should be consolidated and moved to stout, along with mount and
@@ -239,8 +277,11 @@ struct MountInfoTable {
       const std::string& lines,
       bool hierarchicalSort = true);
 
-  // TODO(jieyu): Introduce 'find' methods to find entries that match
-  // the given conditions (e.g., target, root, devno, etc.).
+  // Find the mount table entry by the given target path. If there is
+  // no mount table entry that matches the exact target path, return
+  // the mount table entry that is the immediate parent of the given
+  // target path (similar to `findmnt --target [TARGET]`).
+  static Try<Entry> findByTarget(const std::string& target);
 
   std::vector<Entry> entries;
 };
@@ -342,7 +383,7 @@ Try<Nothing> pivot_root(const std::string& newRoot, const std::string& putOld);
 
 namespace chroot {
 
-// Enter a 'chroot' enviroment. The caller should be in a new mount
+// Enter a 'chroot' environment. The caller should be in a new mount
 // namespace. Basic configuration of special filesystems and device
 // nodes is performed. Any mounts to the current root will be
 // unmounted.

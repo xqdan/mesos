@@ -41,6 +41,8 @@ using std::endl;
 using std::string;
 using std::vector;
 
+constexpr char FRAMEWORK_NAME[] = "Load Generator Framework (C++)";
+
 
 // Generate load towards the master (by repeatedly sending
 // ReconcileTasksMessages) at the specified rate and for the
@@ -65,7 +67,7 @@ private:
     watch.start();
 
     while (true) {
-      Duration elapsed =  watch.elapsed();
+      Duration elapsed = watch.elapsed();
 
       if (duration.isSome() && elapsed >= duration.get()) {
         LOG(INFO) << "LoadGenerator generated " << messages
@@ -283,7 +285,6 @@ public:
 int main(int argc, char** argv)
 {
   Flags flags;
-
   Try<flags::Warnings> load = flags.load("MESOS_", argc, argv);
 
   if (load.isError()) {
@@ -297,7 +298,7 @@ int main(int argc, char** argv)
   }
 
   if (flags.master.isNone()) {
-    cerr << flags.usage( "Missing required option --master") << endl;
+    cerr << flags.usage("Missing required option --master") << endl;
     return EXIT_FAILURE;
   }
 
@@ -312,7 +313,7 @@ int main(int argc, char** argv)
   }
 
   // We want the logger to catch failure signals.
-  mesos::internal::logging::initialize(argv[0], flags, true);
+  mesos::internal::logging::initialize(argv[0], true, flags);
 
   // Log any flag warnings (after logging is initialized).
   foreach (const flags::Warning& warning, load->warnings) {
@@ -323,7 +324,9 @@ int main(int argc, char** argv)
 
   FrameworkInfo framework;
   framework.set_user(""); // Have Mesos fill in the current user.
-  framework.set_name("Load Generator Framework (C++)");
+  framework.set_name(FRAMEWORK_NAME);
+  framework.add_capabilities()->set_type(
+      FrameworkInfo::Capability::RESERVATION_REFINEMENT);
 
   const Option<string> checkpoint = os::getenv("MESOS_CHECKPOINT");
   if (checkpoint.isSome()) {

@@ -16,6 +16,10 @@
 #include <assert.h>
 
 #include <algorithm>
+#include <functional>
+#include <type_traits>
+
+#include <boost/functional/hash.hpp>
 
 #include <stout/none.hpp>
 #include <stout/some.hpp>
@@ -61,7 +65,9 @@ public:
     }
   }
 
-  Option(Option<T>&& that) : state(std::move(that.state))
+  Option(Option<T>&& that)
+      noexcept(std::is_nothrow_move_constructible<T>::value)
+    : state(std::move(that.state))
   {
     if (that.isSome()) {
       new (&t) T(std::move(that.t));
@@ -91,6 +97,7 @@ public:
   }
 
   Option<T>& operator=(Option<T>&& that)
+      noexcept(std::is_nothrow_move_constructible<T>::value)
   {
     if (this != &that) {
       if (isSome()) {
@@ -215,5 +222,26 @@ Option<T> max(const T& left, const Option<T>& right)
 {
   return max(Option<T>(left), right);
 }
+
+namespace std {
+
+template <typename T>
+struct hash<Option<T>>
+{
+  typedef size_t result_type;
+
+  typedef Option<T> argument_type;
+
+  result_type operator()(const argument_type& option) const
+  {
+    size_t seed = 0;
+    if (option.isSome()) {
+      boost::hash_combine(seed, hash<T>()(option.get()));
+    }
+    return seed;
+  }
+};
+
+} // namespace std {
 
 #endif // __STOUT_OPTION_HPP__

@@ -21,12 +21,19 @@
 #include <string>
 #include <vector>
 
+#ifdef __WINDOWS__
+// `codecvt` is not available on older versions of Linux. Until it is needed on
+// other platforms, it's easiest to just build the UTF converter for Windows.
+#include <codecvt>
+#include <locale>
+#endif // __WINDOWS__
+
 #include "abort.hpp"
 #include "hashmap.hpp"
 #include "set.hpp"
 
 template <typename T>
-std::string stringify(T t)
+std::string stringify(const T& t)
 {
   std::ostringstream out;
   out << t;
@@ -37,7 +44,41 @@ std::string stringify(T t)
 }
 
 
-template <>
+// We provide an explicit overload for strings so we do not incur the overhead
+// of a stringstream in generic code (e.g., when stringifying containers of
+// strings below).
+inline std::string stringify(const std::string& str)
+{
+  return str;
+}
+
+
+#ifdef __WINDOWS__
+inline std::string stringify(const std::wstring& str)
+{
+  // Convert UTF-16 `wstring` to UTF-8 `string`.
+  static std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>, wchar_t>
+    converter(
+        "UTF-16 to UTF-8 conversion failed",
+        L"UTF-16 to UTF-8 conversion failed");
+
+  return converter.to_bytes(str);
+}
+
+
+inline std::wstring wide_stringify(const std::string& str)
+{
+  // Convert UTF-8 `string` to UTF-16 `wstring`.
+  static std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>, wchar_t>
+    converter(
+        "UTF-8 to UTF-16 conversion failed",
+        L"UTF-8 to UTF-16 conversion failed");
+
+  return converter.from_bytes(str);
+}
+#endif // __WINDOWS__
+
+
 inline std::string stringify(bool b)
 {
   return b ? "true" : "false";

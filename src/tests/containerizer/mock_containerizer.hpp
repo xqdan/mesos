@@ -26,6 +26,7 @@
 
 #include <process/future.hpp>
 #include <process/gmock.hpp>
+#include <process/http.hpp>
 
 #include <stout/hashset.hpp>
 #include <stout/nothing.hpp>
@@ -45,27 +46,17 @@ public:
       process::Future<Nothing>(
           const Option<slave::state::SlaveState>&));
 
-  MOCK_METHOD8(
+  MOCK_METHOD4(
       launch,
-      process::Future<bool>(
+      process::Future<slave::Containerizer::LaunchResult>(
           const ContainerID&,
-          const Option<TaskInfo>&,
-          const ExecutorInfo&,
-          const std::string&,
-          const Option<std::string>&,
-          const SlaveID&,
+          const mesos::slave::ContainerConfig&,
           const std::map<std::string, std::string>&,
-          bool));
+          const Option<std::string>&));
 
-  MOCK_METHOD6(
-      launch,
-      process::Future<bool>(
-          const ContainerID&,
-          const CommandInfo&,
-          const Option<ContainerInfo>&,
-          const Option<std::string>&,
-          const SlaveID&,
-          const Option<mesos::slave::ContainerClass>&));
+  MOCK_METHOD1(
+      attach,
+      process::Future<process::http::Connection>(const ContainerID&));
 
   MOCK_METHOD2(
       update,
@@ -90,6 +81,11 @@ public:
   MOCK_METHOD0(
       containers,
       process::Future<hashset<ContainerID>>());
+
+  MOCK_METHOD1(
+      pruneImages,
+      process::Future<Nothing>(
+          const std::vector<Image>&));
 };
 
 } // namespace tests {

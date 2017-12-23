@@ -34,6 +34,19 @@
 namespace flags {
 
 template <>
+inline Try<mesos::internal::ImageGcConfig> parse(const std::string& value)
+{
+  // Convert from string or file to JSON.
+  Try<JSON::Object> json = parse<JSON::Object>(value);
+  if (json.isError()) {
+    return Error(json.error());
+  }
+
+  return protobuf::parse<mesos::internal::ImageGcConfig>(json.get());
+}
+
+
+template <>
 inline Try<mesos::internal::Firewall> parse(const std::string& value)
 {
   // Convert from string or file to JSON.
@@ -45,6 +58,32 @@ inline Try<mesos::internal::Firewall> parse(const std::string& value)
   return protobuf::parse<mesos::internal::Firewall>(json.get());
 }
 
+
+template <>
+inline Try<mesos::internal::ContainerDNSInfo> parse(const std::string& value)
+{
+  // Convert from string or file to JSON.
+  Try<JSON::Object> json = parse<JSON::Object>(value);
+  if (json.isError()) {
+    return Error(json.error());
+  }
+
+  return protobuf::parse<mesos::internal::ContainerDNSInfo>(json.get());
+}
+
+
+template <>
+inline Try<mesos::internal::SlaveCapabilities> parse(const std::string& value)
+{
+  // Convert from string or file to JSON.
+  Try<JSON::Object> json = parse<JSON::Object>(value);
+  if (json.isError()) {
+    return Error(json.error());
+  }
+
+  return protobuf::parse<mesos::internal::SlaveCapabilities>(json.get());
+}
+
 } // namespace flags {
 
 namespace mesos {
@@ -52,9 +91,33 @@ namespace internal {
 
 inline std::ostream& operator<<(
     std::ostream& stream,
+    const ImageGcConfig& imageGcConfig)
+{
+  return stream << imageGcConfig.DebugString();
+}
+
+
+inline std::ostream& operator<<(
+    std::ostream& stream,
     const Firewall& rules)
 {
   return stream << rules.DebugString();
+}
+
+
+inline std::ostream& operator<<(
+    std::ostream& stream,
+    const ContainerDNSInfo& dns)
+{
+  return stream << dns.DebugString();
+}
+
+
+inline std::ostream& operator<<(
+    std::ostream& stream,
+    const SlaveCapabilities& slaveCapabilities)
+{
+  return stream << slaveCapabilities.DebugString();
 }
 
 } // namespace internal {

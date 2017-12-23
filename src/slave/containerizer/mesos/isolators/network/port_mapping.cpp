@@ -49,11 +49,13 @@
 #include <stout/strings.hpp>
 #include <stout/utils.hpp>
 
+#include <stout/os/constants.hpp>
 #include <stout/os/exists.hpp>
 #include <stout/os/realpath.hpp>
 #include <stout/os/stat.hpp>
 
 #include "common/status_utils.hpp"
+#include "common/values.hpp"
 
 #include "linux/fs.hpp"
 #include "linux/ns.hpp"
@@ -106,6 +108,8 @@ using std::vector;
 
 using filter::ip::PortRange;
 
+using mesos::internal::values::rangesToIntervalSet;
+
 using mesos::slave::ContainerConfig;
 using mesos::slave::ContainerLaunchInfo;
 using mesos::slave::ContainerLimitation;
@@ -125,8 +129,8 @@ namespace slave {
 static const uint16_t MIN_EPHEMERAL_PORTS_SIZE = 16;
 
 // Linux traffic control is a combination of queueing disciplines,
-// filters and classes organized as a tree for the ingress (tx) and
-// egress (rx) flows for each interface. Each container provides two
+// filters and classes organized as a tree for the ingress (rx) and
+// egress (tx) flows for each interface. Each container provides two
 // networking interfaces, a virtual eth0 and a loopback interface. The
 // flow of packets from the external network to container is shown
 // below:
@@ -162,7 +166,7 @@ static const uint16_t MIN_EPHEMERAL_PORTS_SIZE = 16;
 // network flows along the reverse path [4,5,6]. Loopback traffic is
 // directed to the corresponding Ethernet interface, either [7,10] or
 // [8,9] where the same destination port routing can be applied as to
-// external traffic. We use traffic control filters at several of the
+// external traffic. We use traffic control filters on several of the
 // interfaces to create these packet paths.
 //
 // Linux provides only a very simple topology for ingress interfaces.
@@ -371,20 +375,6 @@ static string getNamespaceHandlePath(const string& bindMountRoot, pid_t pid)
   return path::join(bindMountRoot, stringify(pid));
 }
 
-
-// Converts from value ranges to interval set.
-static IntervalSet<uint16_t> getIntervalSet(const Value::Ranges& ranges)
-{
-  IntervalSet<uint16_t> set;
-
-  for (int i = 0; i < ranges.range_size(); i++) {
-    set += (Bound<uint16_t>::closed(ranges.range(i).begin()),
-            Bound<uint16_t>::closed(ranges.range(i).end()));
-  }
-
-  return set;
-}
-
 /////////////////////////////////////////////////
 // Implementation for PortMappingUpdate.
 /////////////////////////////////////////////////
@@ -495,7 +485,7 @@ static Try<Nothing> addContainerIPFilters(
       ingress::HANDLE,
       ip::Classifier(
           None(),
-          net::IPNetwork::LOOPBACK_V4().address(),
+          net::IP::Network::LOOPBACK_V4().address(),
           None(),
           range),
       Priority(IP_FILTER_PRIORITY, NORMAL),
@@ -546,7 +536,7 @@ static Try<Nothing> removeContainerIPFilters(
       ingress::HANDLE,
       ip::Classifier(
           None(),
-          net::IPNetwork::LOOPBACK_V4().address(),
+          net::IP::Network::LOOPBACK_V4().address(),
           None(),
           range));
 
@@ -1156,7 +1146,7 @@ int PortMappingStatistics::execute()
           Try<int64_t> val = numify<int64_t>(tokens[i]);
 
           if (val.isError()) {
-            cerr << "Failed to parse the statistics in " <<  fields[0]
+            cerr << "Failed to parse the statistics in " << fields[0]
                  << val.error() << endl;
             return 1;
           }
@@ -1422,14 +1412,34 @@ Try<Isolator*> PortMappingIsolatorProcess::create(const Flags& flags)
   // treated as non-ephemeral ports.
   IntervalSet<uint16_t> nonEphemeralPorts;
   if (resources.get().ports().isSome()) {
-    nonEphemeralPorts = getIntervalSet(resources.get().ports().get());
+    Try<IntervalSet<uint16_t>> ports = rangesToIntervalSet<uint16_t>(
+        resources.get().ports().get());
+
+    if (ports.isError()) {
+      return Error(
+          "Invalid ports resource '" +
+          stringify(resources.get().ports().get()) +
+          "': " + ports.error());
+    }
+
+    nonEphemeralPorts = ports.get();
   }
 
   // Get 'ephemeral_ports' resource from 'resources' flag. These ports
   // will be allocated to each container as ephemeral ports.
   IntervalSet<uint16_t> ephemeralPorts;
   if (resources.get().ephemeral_ports().isSome()) {
-    ephemeralPorts = getIntervalSet(resources.get().ephemeral_ports().get());
+    Try<IntervalSet<uint16_t>> ports = rangesToIntervalSet<uint16_t>(
+        resources.get().ephemeral_ports().get());
+
+    if (ports.isError()) {
+      return Error(
+          "Invalid ephemeral ports resource '" +
+          stringify(resources.get().ephemeral_ports().get()) +
+          "': " + ports.error());
+    }
+
+    ephemeralPorts = ports.get();
   }
 
   // Each container requires at least one ephemeral port for slave
@@ -1552,7 +1562,8 @@ Try<Isolator*> PortMappingIsolatorProcess::create(const Flags& flags)
     // eth0 is not specified in the flag and we did not get a valid
     // eth0 from the library.
     return Error(
-        "Network Isolator failed to find a public interface: " + eth0.error());
+        "Network Isolator failed to find a public interface: " +
+        (eth0.isError() ? eth0.error() : "does not have a public interface"));
   }
 
   LOG(INFO) << "Using " << eth0.get() << " as the public interface";
@@ -1577,7 +1588,8 @@ Try<Isolator*> PortMappingIsolatorProcess::create(const Flags& flags)
     // lo is not specified in the flag and we did not get a valid
     // lo from the library.
     return Error(
-        "Network Isolator failed to find a loopback interface: " + lo.error());
+        "Network Isolator failed to find a loopback interface: " +
+        (lo.isError() ? lo.error() : "does not have a loopback interface"));
   }
 
   LOG(INFO) << "Using " << lo.get() << " as the loopback interface";
@@ -1587,35 +1599,47 @@ Try<Isolator*> PortMappingIsolatorProcess::create(const Flags& flags)
   Option<Bytes> egressRateLimitPerContainer;
   if (flags.egress_rate_limit_per_container.isSome()) {
     // Read host physical link speed from /sys/class/net/eth0/speed.
-    // This value is in MBits/s.
-    Try<string> value =
-      os::read(path::join("/sys/class/net", eth0.get(), "speed"));
+    // This value is in MBits/s. Some distribution does not support
+    // reading speed (depending on the driver). If that's the case,
+    // simply print warnings.
+    const string eth0SpeedPath =
+      path::join("/sys/class/net", eth0.get(), "speed");
 
-    if (value.isError()) {
-      return Error(
-          "Failed to read " +
-          path::join("/sys/class/net", eth0.get(), "speed") +
-          ": " + value.error());
-    }
+    if (!os::exists(eth0SpeedPath)) {
+      LOG(WARNING) << "Cannot determine link speed of " << eth0.get()
+                   << ": '" << eth0SpeedPath << "' does not exist";
+    } else {
+      Try<string> value = os::read(eth0SpeedPath);
+      if (value.isError()) {
+        // NOTE: Even if the speed file exists, the read might fail if
+        // the driver does not support reading the speed. Therefore,
+        // we print a warning here, instead of failing.
+        LOG(WARNING) << "Cannot determine link speed of " << eth0.get()
+                     << ": Failed to read '" << eth0SpeedPath
+                     << "': " << value.error();
+      } else {
+        Try<uint64_t> hostLinkSpeed =
+          numify<uint64_t>(strings::trim(value.get()));
 
-    Try<uint64_t> hostLinkSpeed = numify<uint64_t>(strings::trim(value.get()));
-    CHECK_SOME(hostLinkSpeed);
+        CHECK_SOME(hostLinkSpeed);
 
-    // It could be possible that the nic driver doesn't support
-    // reporting physical link speed. In that case, report error.
-    if (hostLinkSpeed.get() == 0xFFFFFFFF) {
-      return Error(
-          "Network Isolator failed to determine link speed for " + eth0.get());
-    }
-
-    // Convert host link speed to Bytes/s for comparason.
-    if (hostLinkSpeed.get() * 1000000 / 8 <
-        flags.egress_rate_limit_per_container.get().bytes()) {
-      return Error(
-          "The given egress traffic limit for containers " +
-          stringify(flags.egress_rate_limit_per_container.get().bytes()) +
-          " Bytes/s is greater than the host link speed " +
-          stringify(hostLinkSpeed.get() * 1000000 / 8) + " Bytes/s");
+        // It could be possible that the nic driver doesn't support
+        // reporting physical link speed. In that case, report error.
+        if (hostLinkSpeed.get() == 0xFFFFFFFF) {
+          LOG(WARNING) << "Link speed reporting is not supported for '"
+                       << eth0.get() + "'";
+        } else {
+          // Convert host link speed to Bytes/s for comparason.
+          if (hostLinkSpeed.get() * 1000000 / 8 <
+              flags.egress_rate_limit_per_container.get().bytes()) {
+            return Error(
+                "The given egress traffic limit for containers " +
+                stringify(flags.egress_rate_limit_per_container.get().bytes()) +
+                " Bytes/s is greater than the host link speed " +
+                stringify(hostLinkSpeed.get() * 1000000 / 8) + " Bytes/s");
+          }
+        }
+      }
     }
 
     if (flags.egress_rate_limit_per_container.get() != Bytes(0)) {
@@ -1626,8 +1650,8 @@ Try<Isolator*> PortMappingIsolatorProcess::create(const Flags& flags)
   }
 
   // Get the host IP network, MAC and default gateway.
-  Result<net::IPNetwork> hostIPNetwork =
-    net::IPNetwork::fromLinkDevice(eth0.get(), AF_INET);
+  Result<net::IP::Network> hostIPNetwork =
+    net::IP::Network::fromLinkDevice(eth0.get(), AF_INET);
 
   if (!hostIPNetwork.isSome()) {
     return Error(
@@ -2470,13 +2494,13 @@ Future<Option<ContainerLaunchInfo>> PortMappingIsolatorProcess::prepare(
   }
 
   const ExecutorInfo& executorInfo = containerConfig.executor_info();
-
-  Resources resources(executorInfo.resources());
+  const Resources resources(containerConfig.resources());
 
   IntervalSet<uint16_t> nonEphemeralPorts;
 
   if (resources.ports().isSome()) {
-    nonEphemeralPorts = getIntervalSet(resources.ports().get());
+    nonEphemeralPorts = rangesToIntervalSet<uint16_t>(
+        resources.ports().get()).get();
 
     // Sanity check to make sure that the assigned non-ephemeral ports
     // for the container are part of the non-ephemeral ports specified
@@ -2522,7 +2546,8 @@ Future<Option<ContainerLaunchInfo>> PortMappingIsolatorProcess::prepare(
   // other isolators, we need to set mount sharing accordingly for
   // PORT_MAPPING_BIND_MOUNT_ROOT to avoid races described in
   // MESOS-1558. So we turn on mount namespace here for consistency.
-  launchInfo.set_clone_namespaces(CLONE_NEWNET | CLONE_NEWNS);
+  launchInfo.add_clone_namespaces(CLONE_NEWNET);
+  launchInfo.add_clone_namespaces(CLONE_NEWNS);
 
   return launchInfo;
 }
@@ -2888,7 +2913,7 @@ Future<ContainerLimitation> PortMappingIsolatorProcess::watch(
   if (unmanaged.contains(containerId)) {
     LOG(WARNING) << "Ignoring watch for unmanaged container " << containerId;
   } else if (!infos.contains(containerId)) {
-    LOG(WARNING) << "Ignoring watch for unknown container "  << containerId;
+    LOG(WARNING) << "Ignoring watch for unknown container " << containerId;
   }
 
   // Currently, we always return a pending future because limitation
@@ -2960,7 +2985,8 @@ Future<Nothing> PortMappingIsolatorProcess::update(
   IntervalSet<uint16_t> nonEphemeralPorts;
 
   if (resources.ports().isSome()) {
-    nonEphemeralPorts = getIntervalSet(resources.ports().get());
+    nonEphemeralPorts = rangesToIntervalSet<uint16_t>(
+        resources.ports().get()).get();
 
     // Sanity check to make sure that the assigned non-ephemeral ports
     // for the container are part of the non-ephemeral ports specified
@@ -3078,7 +3104,7 @@ Future<Nothing> PortMappingIsolatorProcess::update(
   Try<Subprocess> s = subprocess(
       path::join(flags.launcher_dir, "mesos-network-helper"),
       argv,
-      Subprocess::PATH("/dev/null"),
+      Subprocess::PATH(os::DEV_NULL),
       Subprocess::FD(STDOUT_FILENO),
       Subprocess::FD(STDERR_FILENO),
       &update.flags);
@@ -3204,7 +3230,7 @@ Future<ResourceStatistics> PortMappingIsolatorProcess::usage(
   Try<Subprocess> s = subprocess(
       path::join(flags.launcher_dir, "mesos-network-helper"),
       argv,
-      Subprocess::PATH("/dev/null"),
+      Subprocess::PATH(os::DEV_NULL),
       Subprocess::PIPE(),
       Subprocess::FD(STDERR_FILENO),
       &statistics.flags);
@@ -3662,7 +3688,7 @@ Try<Nothing> PortMappingIsolatorProcess::addHostIPFilters(
       ingress::HANDLE,
       ip::Classifier(
           None(),
-          net::IPNetwork::LOOPBACK_V4().address(),
+          net::IP::Network::LOOPBACK_V4().address(),
           range,
           None()),
       Priority(IP_FILTER_PRIORITY, NORMAL),
@@ -3865,7 +3891,7 @@ Try<Nothing> PortMappingIsolatorProcess::removeHostIPFilters(
       ingress::HANDLE,
       ip::Classifier(
           None(),
-          net::IPNetwork::LOOPBACK_V4().address(),
+          net::IP::Network::LOOPBACK_V4().address(),
           range,
           None()));
 
@@ -3939,8 +3965,9 @@ string PortMappingIsolatorProcess::scripts(Info* info)
   // checksum offloading ensures the TCP layer will checksum and drop
   // it.
   script << "ethtool -K " << eth0 << " rx off\n";
-  script << "ip link set " << eth0 << " address " << hostMAC << " up\n";
-  script << "ip addr add " << hostIPNetwork  << " dev " << eth0 << "\n";
+  script << "ip link set " << eth0 << " address " << hostMAC
+         << " mtu " << hostEth0MTU << " up\n";
+  script << "ip addr add " << hostIPNetwork << " dev " << eth0 << "\n";
 
   // Set up the default gateway to match that of eth0.
   script << "ip route add default via " << hostDefaultGateway << "\n";
@@ -3989,7 +4016,7 @@ string PortMappingIsolatorProcess::scripts(Info* info)
          << " prio " << Priority(IP_FILTER_PRIORITY, NORMAL).get() << " u32"
          << " flowid ffff:0"
          << " match ip dst "
-         << net::IPNetwork::LOOPBACK_V4().address()
+         << net::IP::Network::LOOPBACK_V4().address()
          << " action mirred egress redirect dev " << eth0 << "\n";
 
   foreach (const PortRange& range,
@@ -4009,7 +4036,7 @@ string PortMappingIsolatorProcess::scripts(Info* info)
            << " prio " << Priority(IP_FILTER_PRIORITY, NORMAL).get() << " u32"
            << " flowid ffff:0"
            << " match ip dst "
-           << net::IPNetwork::LOOPBACK_V4().address()
+           << net::IP::Network::LOOPBACK_V4().address()
            << " match ip dport " << range.begin() << " "
            << hex << range.mask() << dec
            << " action mirred egress redirect dev " << lo << "\n";
@@ -4029,7 +4056,7 @@ string PortMappingIsolatorProcess::scripts(Info* info)
          << " flowid ffff:0"
          << " match ip protocol 1 0xff"
          << " match ip dst "
-         << net::IPNetwork::LOOPBACK_V4().address() << "\n";
+         << net::IP::Network::LOOPBACK_V4().address() << "\n";
 
   // Display the filters created on eth0 and lo.
   script << "tc filter show dev " << eth0

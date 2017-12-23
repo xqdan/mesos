@@ -56,25 +56,14 @@ public:
   static Environment slaveExecutorEnvironmentDecorator(
       ExecutorInfo executorInfo);
 
-  static process::Future<std::map<std::string, std::string>>
-    slavePreLaunchDockerEnvironmentDecorator(
+  static process::Future<DockerTaskExecutorPrepareInfo>
+    slavePreLaunchDockerTaskExecutorDecorator(
         const Option<TaskInfo>& taskInfo,
         const ExecutorInfo& executorInfo,
         const std::string& containerName,
-        const std::string& sandboxDirectory,
-        const std::string& mappedDirectory,
+        const std::string& containerWorkDirectory,
+        const std::string& mappedSandboxDirectory,
         const Option<std::map<std::string, std::string>>& env);
-
-  static void slavePreLaunchDockerHook(
-      const ContainerInfo& containerInfo,
-      const CommandInfo& commandInfo,
-      const Option<TaskInfo>& taskInfo,
-      const ExecutorInfo& executorInfo,
-      const std::string& containerName,
-      const std::string& sandboxDirectory,
-      const std::string& mappedDirectory,
-      const Option<Resources>& resources,
-      const Option<std::map<std::string, std::string>>& env);
 
   static void slavePostFetchHook(
       const ContainerID& containerId,

@@ -64,21 +64,21 @@ class LinuxLauncherProcess : public Process<LinuxLauncherProcess>
 public:
   LinuxLauncherProcess(
       const Flags& flags,
-      const std::string& freezerHierarchy,
-      const Option<std::string>& systemdHierarchy);
+      const string& freezerHierarchy,
+      const Option<string>& systemdHierarchy);
 
   virtual process::Future<hashset<ContainerID>> recover(
-      const std::list<mesos::slave::ContainerState>& states);
+      const list<mesos::slave::ContainerState>& states);
 
   virtual Try<pid_t> fork(
       const ContainerID& containerId,
-      const std::string& path,
-      const std::vector<std::string>& argv,
+      const string& path,
+      const vector<string>& argv,
       const process::Subprocess::IO& in,
       const process::Subprocess::IO& out,
       const process::Subprocess::IO& err,
       const flags::FlagsBase* flags,
-      const Option<std::map<std::string, std::string>>& environment,
+      const Option<map<string, string>>& environment,
       const Option<int>& enterNamespaces,
       const Option<int>& cloneNamespaces);
 
@@ -107,18 +107,14 @@ private:
     Option<pid_t> pid = None();
   };
 
-  // Helper for determining the cgroup for a container (i.e., the path
-  // in a cgroup subsystem).
-  std::string cgroup(const ContainerID& containerId);
-
   // Helper for parsing the cgroup path to determine the container ID
   // it belongs to.
   Option<ContainerID> parse(const string& cgroup);
 
-  static const std::string subsystem;
+  static const string subsystem;
   const Flags flags;
-  const std::string freezerHierarchy;
-  const Option<std::string> systemdHierarchy;
+  const string freezerHierarchy;
+  const Option<string> systemdHierarchy;
   hashmap<ContainerID, Container> containers;
 };
 
@@ -178,6 +174,19 @@ bool LinuxLauncher::available()
 }
 
 
+string LinuxLauncher::cgroup(
+    const string& cgroupsRoot,
+    const ContainerID& containerId)
+{
+  return path::join(
+      cgroupsRoot,
+      containerizer::paths::buildPath(
+          containerId,
+          CGROUP_SEPARATOR,
+          containerizer::paths::JOIN));
+}
+
+
 LinuxLauncher::LinuxLauncher(
     const Flags& flags,
     const string& freezerHierarchy,
@@ -196,7 +205,7 @@ LinuxLauncher::~LinuxLauncher()
 
 
 Future<hashset<ContainerID>> LinuxLauncher::recover(
-    const std::list<mesos::slave::ContainerState>& states)
+    const list<mesos::slave::ContainerState>& states)
 {
   return dispatch(process.get(), &LinuxLauncherProcess::recover, states);
 }
@@ -205,7 +214,7 @@ Future<hashset<ContainerID>> LinuxLauncher::recover(
 Try<pid_t> LinuxLauncher::fork(
     const ContainerID& containerId,
     const string& path,
-    const vector<std::string>& argv,
+    const vector<string>& argv,
     const process::Subprocess::IO& in,
     const process::Subprocess::IO& out,
     const process::Subprocess::IO& err,
@@ -330,7 +339,7 @@ Future<hashset<ContainerID>> LinuxLauncherProcess::recover(
   // still in the `MESOS_EXECUTORS_SLICE`. If they are not, warn the
   // operator that resource isolation may be invalidated.
   if (systemdHierarchy.isSome()) {
-    Result<std::set<pid_t>> mesosExecutorSlicePids = cgroups::processes(
+    Result<set<pid_t>> mesosExecutorSlicePids = cgroups::processes(
         systemdHierarchy.get(),
         systemd::mesos::MESOS_EXECUTORS_SLICE);
 
@@ -417,7 +426,7 @@ Try<pid_t> LinuxLauncherProcess::fork(
   }
 
   // Ensure we didn't pass `enterNamespaces`
-  // if we aren't forking a nested contiainer.
+  // if we aren't forking a nested container.
   if (!containerId.has_parent() && enterNamespaces.isSome()) {
     return Error("Cannot enter parent namespaces for non-nested container");
   }
@@ -454,7 +463,7 @@ Try<pid_t> LinuxLauncherProcess::fork(
   parentHooks.emplace_back(Subprocess::ParentHook([=](pid_t child) {
     return cgroups::isolate(
         freezerHierarchy,
-        cgroup(containerId),
+        LinuxLauncher::cgroup(this->flags.cgroups_root, containerId),
         child);
   }));
 
@@ -519,6 +528,9 @@ Future<Nothing> LinuxLauncherProcess::destroy(const ContainerID& containerId)
     }
   }
 
+  const string cgroup =
+    LinuxLauncher::cgroup(flags.cgroups_root, container->id);
+
   // We remove the container so that we don't attempt multiple
   // destroys simultaneously and no other functions will return
   // information about the container that is currently being (or has
@@ -534,7 +546,7 @@ Future<Nothing> LinuxLauncherProcess::destroy(const ContainerID& containerId)
   // is considered partially destroyed if we have recovered it from
   // ContainerState but we don't have a freezer cgroup for it. If this
   // is a partially destroyed container than there is nothing to do.
-  Try<bool> exists = cgroups::exists(freezerHierarchy, cgroup(container->id));
+  Try<bool> exists = cgroups::exists(freezerHierarchy, cgroup);
   if (exists.isError()) {
     return Failure("Failed to determine if cgroup exists: " + exists.error());
   }
@@ -545,7 +557,7 @@ Future<Nothing> LinuxLauncherProcess::destroy(const ContainerID& containerId)
     return Nothing();
   }
 
-  LOG(INFO) << "Using freezer to destroy cgroup " << cgroup(container->id);
+  LOG(INFO) << "Using freezer to destroy cgroup " << cgroup;
 
   // TODO(benh): If this is the last container at a nesting level,
   // should we also delete the `CGROUP_SEPARATOR` cgroup too?
@@ -554,7 +566,7 @@ Future<Nothing> LinuxLauncherProcess::destroy(const ContainerID& containerId)
   // retry?
   return cgroups::destroy(
       freezerHierarchy,
-      cgroup(container->id),
+      cgroup,
       cgroups::DESTROY_TIMEOUT);
 }
 
@@ -575,17 +587,6 @@ Future<ContainerStatus> LinuxLauncherProcess::status(
   }
 
   return status;
-}
-
-
-string LinuxLauncherProcess::cgroup(const ContainerID& containerId)
-{
-  return path::join(
-      flags.cgroups_root,
-      containerizer::paths::buildPath(
-          containerId,
-          CGROUP_SEPARATOR,
-          containerizer::paths::JOIN));
 }
 
 

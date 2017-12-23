@@ -23,7 +23,6 @@
 // use textdomain(), compilation errors ensue.
 #define ENABLE_GETTEXT
 #include <xfs/xfs.h>
-#include <xfs/xqm.h>
 #undef ENABLE_GETTEXT
 
 // xfs/platform_defs-x86_64.h defines min() and max() macros which conflict
@@ -34,6 +33,7 @@
 #include <fts.h>
 
 #include <blkid/blkid.h>
+#include <linux/dqblk_xfs.h>
 #include <linux/quota.h>
 #include <sys/quota.h>
 
@@ -58,11 +58,6 @@ using std::string;
 namespace mesos {
 namespace internal {
 namespace xfs {
-
-// The quota API defines space limits in terms of in basic
-// blocks (512 bytes).
-static constexpr Bytes BASIC_BLOCK_SIZE = Bytes(512u);
-
 
 // Although XFS itself doesn't define any invalid project IDs,
 // we need a way to know whether or not a project ID was assigned
@@ -152,14 +147,15 @@ static Try<Nothing> setProjectQuota(
 
   // Specify that we are setting a project quota for this ID.
   quota.d_id = projectId;
-  quota.d_flags = XFS_PROJ_QUOTA;
+  quota.d_flags = FS_PROJ_QUOTA;
 
-  // Set both the hard and the soft limit to the same quota, just
-  // for consistency. Functionally all we need is the hard quota.
+  // Set both the hard and the soft limit to the same quota. Functionally
+  // all we need is the hard limit. The soft limit has no effect when it
+  // is the same as the hard limit but we set it for explicitness.
   quota.d_fieldmask = FS_DQ_BSOFT | FS_DQ_BHARD;
 
-  quota.d_blk_hardlimit = limit.bytes() / BASIC_BLOCK_SIZE.bytes();
-  quota.d_blk_softlimit = limit.bytes() / BASIC_BLOCK_SIZE.bytes();
+  quota.d_blk_hardlimit = BasicBlocks(limit).blocks();
+  quota.d_blk_softlimit = BasicBlocks(limit).blocks();
 
   if (::quotactl(QCMD(Q_XSETQLIM, PRJQUOTA),
                  devname.get().c_str(),
@@ -229,7 +225,7 @@ Result<QuotaInfo> getProjectQuota(
 
   quota.d_version = FS_DQUOT_VERSION;
   quota.d_id = projectId;
-  quota.d_flags = XFS_PROJ_QUOTA;
+  quota.d_flags = FS_PROJ_QUOTA;
 
   // In principle, we should issue a Q_XQUOTASYNC to get an accurate accounting.
   // However, we don't want to affect performance by continually syncing the
@@ -250,8 +246,8 @@ Result<QuotaInfo> getProjectQuota(
   }
 
   QuotaInfo info;
-  info.limit = BASIC_BLOCK_SIZE * quota.d_blk_hardlimit;
-  info.used =  BASIC_BLOCK_SIZE * quota.d_bcount;
+  info.limit = BasicBlocks(quota.d_blk_hardlimit).bytes();
+  info.used = BasicBlocks(quota.d_bcount).bytes();
 
   return info;
 }
@@ -266,10 +262,10 @@ Try<Nothing> setProjectQuota(
     return nonProjectError();
   }
 
-  // A 0 limit deletes the quota record. Since the limit is in basic
-  // blocks that effectively means > 512 bytes.
-  if (limit < BASIC_BLOCK_SIZE) {
-    return Error("Quota limit must be >= " + stringify(BASIC_BLOCK_SIZE));
+  // A 0 limit deletes the quota record. If that's desired, the
+  // caller should use clearProjectQuota().
+  if (limit == 0) {
+    return Error( "Quota limit must be greater than 0");
   }
 
   return internal::setProjectQuota(path, projectId, limit);
@@ -390,9 +386,39 @@ Option<Error> validateProjectIds(const IntervalSet<prid_t>& projectRange)
 }
 
 
-bool pathIsXfs(const string& path)
+bool isPathXfs(const string& path)
 {
   return ::platform_test_xfs_path(path.c_str()) == 1;
+}
+
+
+Try<bool> isQuotaEnabled(const string& path)
+{
+  Try<string> devname = getDeviceForPath(path);
+  if (devname.isError()) {
+    return Error(devname.error());
+  }
+
+  struct fs_quota_statv statv = {FS_QSTATV_VERSION1};
+
+  // The quota `type` argument to QCMD() doesn't apply to QCMD_XGETQSTATV
+  // since it is for quota subsystem information that can include all
+  // types of quotas. Equally, the quotactl() `id` argument doesn't apply
+  // because we are getting global information rather than information for
+  // a specific identity (eg. a projectId).
+  if (::quotactl(QCMD(Q_XGETQSTATV, 0),
+                 devname.get().c_str(),
+                 0, // id
+                 reinterpret_cast<caddr_t>(&statv)) == -1) {
+    // ENOSYS means that quotas are not enabled at all.
+    if (errno == ENOSYS) {
+      return false;
+    }
+
+    return ErrnoError();
+  }
+
+  return statv.qs_flags & (FS_QUOTA_PDQ_ACCT | FS_QUOTA_PDQ_ENFD);
 }
 
 } // namespace xfs {

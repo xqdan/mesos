@@ -20,6 +20,7 @@
 
 #include <sys/prctl.h>
 
+#include <set>
 #include <string>
 
 #include <stout/numify.hpp>
@@ -29,11 +30,27 @@
 
 #include "linux/capabilities.hpp"
 
+// Vendor the prctl constants for ambient capabilities so that we can build
+// on systems with old glibc but still work on modern kernels.
+#if !defined(PR_CAP_AMBIENT)
+#define PR_CAP_AMBIENT 47
+#endif
+
+#if !defined(PR_CAP_AMBIENT_IS_SET)
+#define PR_CAP_AMBIENT_IS_SET 1
+#endif
+
+#if !defined(PR_CAP_AMBIENT_RAISE)
+#define PR_CAP_AMBIENT_RAISE 2
+#endif
+
+#if !defined(PR_CAP_AMBIENT_CLEAR_ALL)
+#define PR_CAP_AMBIENT_CLEAR_ALL 4
+#endif
+
 using std::hex;
 using std::ostream;
-using std::set;
 using std::string;
-using std::vector;
 
 // We declare two functions provided in the libcap headers here to
 // prevent introduction of that build-time dependency.
@@ -104,7 +121,7 @@ struct SyscallPayload
 
 
 // Helper function to convert capability set to bitset.
-static uint64_t toCapabilityBitset(const set<Capability>& capabilities)
+static uint64_t toCapabilityBitset(const std::set<Capability>& capabilities)
 {
   uint64_t result = 0;
 
@@ -119,9 +136,9 @@ static uint64_t toCapabilityBitset(const set<Capability>& capabilities)
 
 
 // Helper function to convert capability bitset to std::set.
-static set<Capability> toCapabilitySet(uint64_t bitset)
+static std::set<Capability> toCapabilitySet(uint64_t bitset)
 {
-  set<Capability> result;
+  std::set<Capability> result;
 
   for (int i = 0; i < MAX_CAPABILITY; i++) {
     if ((bitset & (1ULL << i)) != 0) {
@@ -133,13 +150,14 @@ static set<Capability> toCapabilitySet(uint64_t bitset)
 }
 
 
-set<Capability> ProcessCapabilities::get(const Type& type) const
+const std::set<Capability>& ProcessCapabilities::get(const Type& type) const
 {
   switch (type) {
     case EFFECTIVE:   return effective;
     case PERMITTED:   return permitted;
     case INHERITABLE: return inheritable;
     case BOUNDING:    return bounding;
+    case AMBIENT:     return ambient;
   }
 
   UNREACHABLE();
@@ -155,6 +173,7 @@ void ProcessCapabilities::set(
     case PERMITTED:   permitted = capabilities;   return;
     case INHERITABLE: inheritable = capabilities; return;
     case BOUNDING:    bounding = capabilities;    return;
+    case AMBIENT:     ambient = capabilities;     return;
   }
 
   UNREACHABLE();
@@ -170,6 +189,7 @@ void ProcessCapabilities::add(
     case PERMITTED:   permitted.insert(capability);   return;
     case INHERITABLE: inheritable.insert(capability); return;
     case BOUNDING:    bounding.insert(capability);    return;
+    case AMBIENT:     ambient.insert(capability);     return;
   }
 
   UNREACHABLE();
@@ -185,10 +205,16 @@ void ProcessCapabilities::drop(
     case PERMITTED:   permitted.erase(capability);   return;
     case INHERITABLE: inheritable.erase(capability); return;
     case BOUNDING:    bounding.erase(capability);    return;
+    case AMBIENT:     ambient.erase(capability);     return;
   }
 
   UNREACHABLE();
 }
+
+
+Capabilities::Capabilities(int _lastCap, bool _ambientSupported)
+  : ambientCapabilitiesSupported(_ambientSupported),
+    lastCap(_lastCap) {}
 
 
 Try<Capabilities> Capabilities::create()
@@ -197,7 +223,10 @@ Try<Capabilities> Capabilities::create()
   SyscallPayload payload;
 
   if (capget(&payload.head, nullptr)) {
-    return ErrnoError("Failed to get linux capability version");
+    // If capget fails with EINVAL it still populates the version field.
+    if (errno != EINVAL) {
+      return ErrnoError("Failed to get linux capability version");
+    }
   }
 
   if (payload.head.version != _LINUX_CAPABILITY_VERSION_3) {
@@ -232,7 +261,13 @@ Try<Capabilities> Capabilities::create()
         stringify(MAX_CAPABILITY) + "'");
   }
 
-  return Capabilities(lastCap.get());
+  // Test whether the kernel supports ambinent capabilities by testing
+  // for the presence arbitrary capability in the ambient set. This can
+  // only fail if the prctl option is not supported.
+  bool ambientSupported =
+    (prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CHOWN, 0, 0) != -1);
+
+  return Capabilities(lastCap.get(), ambientSupported);
 }
 
 
@@ -247,36 +282,74 @@ Try<ProcessCapabilities> Capabilities::get() const
     return ErrnoError("Failed to get capabilities");
   }
 
+  auto getBoundingCapabilities = [this]() {
+    std::set<Capability> bounding;
+
+    // TODO(bbannier): Parse bounding set from the `CapBnd` entry in
+    // `/proc/self/status`.
+    for (int i = 0; i <= lastCap; i++) {
+      if (prctl(PR_CAPBSET_READ, i) == 1) {
+        bounding.insert(Capability(i));
+      }
+    }
+
+    return bounding;
+  };
+
+  auto getAmbientCapabilities = [this]() {
+    std::set<Capability> ambient;
+
+    // TODO(jpeach): Parse the ambient set from the `CapAmb` entry in
+    // `/proc/self/status`.
+    for (int i = 0; i <= lastCap; i++) {
+      if (prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, i, 0, 0) == 1) {
+        ambient.insert(Capability(i));
+      }
+    }
+
+    return ambient;
+  };
+
   ProcessCapabilities capabilities;
 
   capabilities.set(EFFECTIVE, toCapabilitySet(payload.effective()));
   capabilities.set(PERMITTED, toCapabilitySet(payload.permitted()));
   capabilities.set(INHERITABLE, toCapabilitySet(payload.inheritable()));
+  capabilities.set(BOUNDING, getBoundingCapabilities());
 
-  std::set<Capability> bounding;
-
-  // TODO(bbannier): Parse bounding set from the `CapBnd` entry in
-  // `/proc/self/status`.
-  for (int i = 0; i <= lastCap; i++) {
-    if (prctl(PR_CAPBSET_READ, i) == 1) {
-      bounding.insert(Capability(i));
-    }
+  if (ambientCapabilitiesSupported) {
+    capabilities.set(AMBIENT, getAmbientCapabilities());
   }
-
-  capabilities.set(BOUNDING, bounding);
 
   return capabilities;
 }
 
 
-// We do two separate operations:
+// We do three separate operations:
 //  1. Set the `bounding` capabilities for the process.
 //  2. Set the `effective`, `permitted` and `inheritable` capabilities.
+//  3. Clear and then set the `ambient` capabilities.
 //
 // TODO(jojy): Is there a way to make this atomic? Ideally, we would
 // like to rollback any changes if any of the operation fails.
 Try<Nothing> Capabilities::set(const ProcessCapabilities& capabilities)
 {
+  // If we are setting ambient capabilities, verify that they are consistent
+  // so we don't fail after we have already changed our capabilities.
+  if (!capabilities.get(AMBIENT).empty()) {
+    const auto& ambient = capabilities.get(AMBIENT);
+    const auto& permitted = capabilities.get(PERMITTED);
+    const auto& inherited = capabilities.get(INHERITABLE);
+
+    if ((ambient & permitted).size() != ambient.size()) {
+      return Error("Ambient capabilities are not in the permitted set");
+    }
+
+    if ((ambient & inherited).size() != ambient.size()) {
+      return Error("Ambient capabilities are not in the inheritable set");
+    }
+  }
+
   // NOTE: We can only drop capabilities in the bounding set.
   for (int i = 0; i <= lastCap; i++) {
     if (capabilities.get(BOUNDING).count(Capability(i)) > 0) {
@@ -305,6 +378,19 @@ Try<Nothing> Capabilities::set(const ProcessCapabilities& capabilities)
     return ErrnoError("Failed to set capabilities");
   }
 
+  if (ambientCapabilitiesSupported) {
+    if (prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_CLEAR_ALL, 0, 0, 0) < 0) {
+      return ErrnoError("Failed to clear ambient capabilities");
+    }
+
+    foreach(auto cap, capabilities.get(AMBIENT)) {
+      if (prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_RAISE, cap, 0, 0) < 0) {
+        return ErrnoError("Failed to raise capability " + stringify(cap) +
+                          " to the ambient set");
+      }
+    }
+  }
+
   return Nothing();
 }
 
@@ -319,7 +405,7 @@ Try<Nothing> Capabilities::setKeepCaps()
 }
 
 
-set<Capability> Capabilities::getAllSupportedCapabilities()
+std::set<Capability> Capabilities::getAllSupportedCapabilities()
 {
   std::set<Capability> result;
 
@@ -342,9 +428,9 @@ Capability convert(const CapabilityInfo::Capability& capability)
 }
 
 
-set<Capability> convert(const CapabilityInfo& capabilityInfo)
+std::set<Capability> convert(const CapabilityInfo& capabilityInfo)
 {
-  set<Capability> result;
+  std::set<Capability> result;
 
   foreach (int value, capabilityInfo.capabilities()) {
     result.insert(convert(static_cast<CapabilityInfo::Capability>(value)));
@@ -354,7 +440,7 @@ set<Capability> convert(const CapabilityInfo& capabilityInfo)
 }
 
 
-CapabilityInfo convert(const set<Capability>& capabilities)
+CapabilityInfo convert(const std::set<Capability>& capabilities)
 {
   CapabilityInfo capabilityInfo;
 
@@ -422,6 +508,7 @@ ostream& operator<<(ostream& stream, const Type& type)
     case PERMITTED:   return stream << "perm";
     case INHERITABLE: return stream << "inh";
     case BOUNDING:    return stream << "bnd";
+    case AMBIENT:     return stream << "amb";
   }
 
   UNREACHABLE();
@@ -437,7 +524,8 @@ ostream& operator<<(
     << EFFECTIVE   << ": " << stringify(processCapabilities.effective)   << ", "
     << PERMITTED   << ": " << stringify(processCapabilities.permitted)   << ", "
     << INHERITABLE << ": " << stringify(processCapabilities.inheritable) << ", "
-    << BOUNDING    << ": " << stringify(processCapabilities.bounding)
+    << BOUNDING    << ": " << stringify(processCapabilities.bounding)    << ", "
+    << AMBIENT     << ": " << stringify(processCapabilities.ambient)
     << "}";
 }
 

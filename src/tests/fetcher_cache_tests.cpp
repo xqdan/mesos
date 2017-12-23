@@ -38,6 +38,7 @@
 #include <process/queue.hpp>
 #include <process/subprocess.hpp>
 
+#include <stout/json.hpp>
 #include <stout/option.hpp>
 #include <stout/os.hpp>
 #include <stout/path.hpp>
@@ -57,6 +58,8 @@
 #include "tests/containerizer.hpp"
 #include "tests/flags.hpp"
 #include "tests/mesos.hpp"
+#include "tests/mock_fetcher.hpp"
+#include "tests/utils.hpp"
 
 using mesos::fetcher::FetcherInfo;
 
@@ -142,9 +145,11 @@ protected:
   // recovery testing.
   void stopSlave();
 
-  Try<Task> launchTask(const CommandInfo& commandInfo, const size_t taskIndex);
+  Try<Task> launchTask(const CommandInfo& commandInfo, size_t taskIndex);
 
   Try<vector<Task>> launchTasks(const vector<CommandInfo>& commandInfos);
+
+  void verifyCacheMetrics();
 
   // Promises whose futures indicate that FetcherProcess::_fetch() has been
   // called for a task with a given index.
@@ -153,7 +158,6 @@ protected:
   string assetsDirectory;
   string commandPath;
   string archivePath;
-  string cacheDirectory;
 
   Owned<cluster::Master> master;
   Owned<cluster::Slave> slave;
@@ -199,9 +203,6 @@ void FetcherCacheTest::SetUp()
   ASSERT_SOME(_master);
   master = _master.get();
 
-  fetcherProcess = new MockFetcherProcess();
-  fetcher.reset(new Fetcher(Owned<FetcherProcess>(fetcherProcess)));
-
   FrameworkInfo frameworkInfo;
   frameworkInfo.set_name("default");
   frameworkInfo.set_checkpoint(true);
@@ -209,8 +210,7 @@ void FetcherCacheTest::SetUp()
   driver.reset(new MesosSchedulerDriver(
     &scheduler, frameworkInfo, master->pid, DEFAULT_CREDENTIAL));
 
-  EXPECT_CALL(scheduler, registered(driver.get(), _, _))
-    .Times(1);
+  EXPECT_CALL(scheduler, registered(driver.get(), _, _));
 
   // This installs a temporary reaction to resourceOffers calls, which
   // must be in place BEFORE starting the scheduler driver. This
@@ -255,6 +255,43 @@ static void logSandbox(const Path& path)
 }
 
 
+void FetcherCacheTest::verifyCacheMetrics()
+{
+  JSON::Object metrics = Metrics();
+
+  ASSERT_EQ(
+      1u,
+      metrics.values.count("containerizer/fetcher/cache_size_total_bytes"));
+
+  // The total size is always given by the corresponding agent flag.
+  EXPECT_SOME_EQ(
+      flags.fetcher_cache_size.bytes(),
+      metrics.at<JSON::Number>("containerizer/fetcher/cache_size_total_bytes"));
+
+  Try<std::list<Path>> files = fetcherProcess->cacheFiles();
+  ASSERT_SOME(files);
+
+  Bytes used;
+
+  foreach (const auto& file, files.get()) {
+    Try<Bytes> size = os::stat::size(file);
+    ASSERT_SOME(size);
+
+    used += size.get();
+  }
+
+  ASSERT_EQ(
+      1u,
+      metrics.values.count("containerizer/fetcher/cache_size_used_bytes"));
+
+  // Verify that the used amount of cache is the total of the size of
+  // all the files in the cache.
+  EXPECT_SOME_EQ(
+      used.bytes(),
+      metrics.at<JSON::Number>("containerizer/fetcher/cache_size_used_bytes"));
+}
+
+
 void FetcherCacheTest::TearDown()
 {
   if (HasFatalFailure()) {
@@ -283,6 +320,9 @@ void FetcherCacheTest::TearDown()
 // available for all testing as possible.
 void FetcherCacheTest::startSlave()
 {
+  fetcherProcess = new MockFetcherProcess(flags);
+  fetcher.reset(new Fetcher(Owned<FetcherProcess>(fetcherProcess)));
+
   Try<MesosContainerizer*> create = MesosContainerizer::create(
       flags, true, fetcher.get());
 
@@ -300,10 +340,7 @@ void FetcherCacheTest::startSlave()
   slave = _slave.get();
 
   AWAIT_READY(slaveRegisteredMessage);
-  slaveId = slaveRegisteredMessage.get().slave_id();
-
-  cacheDirectory =
-    slave::paths::getSlavePath(flags.fetcher_cache_dir, slaveId);
+  slaveId = slaveRegisteredMessage->slave_id();
 }
 
 
@@ -337,7 +374,7 @@ void FetcherCacheTest::setupArchiveAsset()
   archivePath = path::join(assetsDirectory, ARCHIVE_NAME);
 
   // Make the archive file read-only, so we can tell if it becomes
-  // executable by acccident.
+  // executable by accident.
   ASSERT_SOME(os::chmod(archivePath, S_IRUSR | S_IRGRP | S_IROTH));
 }
 
@@ -391,7 +428,7 @@ static Future<list<Nothing>> awaitFinished(
 // given queue, which later on shall be queried by awaitFinished().
 ACTION_P(PushTaskStatus, taskStatusQueue)
 {
-  TaskStatus taskStatus = arg1;
+  const TaskStatus& taskStatus = arg1;
 
   // Input parameters of ACTION_P are const. We make a mutable copy
   // so that we can use put().
@@ -408,7 +445,7 @@ ACTION_P(PushTaskStatus, taskStatusQueue)
 // available for all testing as possible.
 Try<FetcherCacheTest::Task> FetcherCacheTest::launchTask(
     const CommandInfo& commandInfo,
-    const size_t taskIndex)
+    size_t taskIndex)
 {
   Future<vector<Offer>> offers;
   EXPECT_CALL(scheduler, resourceOffers(driver.get(), _))
@@ -425,7 +462,9 @@ Try<FetcherCacheTest::Task> FetcherCacheTest::launchTask(
            (offers.isFailed() ? offers.failure() : "discarded"));
   }
 
-  CHECK_NE(0u, offers.get().size());
+  if (offers->empty()) {
+    return Error("Received empty list of offers");
+  }
   const Offer offer = offers.get()[0];
 
   TaskInfo task;
@@ -478,7 +517,7 @@ ACTION_TEMPLATE(PushIndexedTaskStatus,
                 HAS_1_TEMPLATE_PARAMS(int, k),
                 AND_1_VALUE_PARAMS(tasks))
 {
-  TaskStatus taskStatus = ::std::tr1::get<k>(args);
+  const TaskStatus& taskStatus = ::std::get<k>(args);
   Try<int> taskId = numify<int>(taskStatus.task_id().value());
   ASSERT_SOME(taskId);
   Queue<TaskStatus> queue = (tasks)[taskId.get()].statusQueue;
@@ -516,7 +555,7 @@ Try<vector<FetcherCacheTest::Task>> FetcherCacheTest::launchTasks(
   // When _fetch() is called, notify us by satisfying a promise that
   // a task has passed the code stretch in which it competes for cache
   // entries.
-  EXPECT_CALL(*fetcherProcess, _fetch(_, _, _, _, _, _))
+  EXPECT_CALL(*fetcherProcess, _fetch(_, _, _, _, _))
     .WillRepeatedly(
         DoAll(SatisfyOne(&fetchContentionWaypoints),
               Invoke(fetcherProcess, &MockFetcherProcess::unmocked__fetch)));
@@ -536,7 +575,7 @@ Try<vector<FetcherCacheTest::Task>> FetcherCacheTest::launchTasks(
            (offers.isFailed() ? offers.failure() : "discarded"));
   }
 
-  EXPECT_NE(0u, offers.get().size());
+  EXPECT_FALSE(offers->empty());
   const Offer offer = offers.get()[0];
 
   vector<TaskInfo> tasks;
@@ -619,8 +658,8 @@ TEST_F(FetcherCacheTest, LocalUncached)
   AWAIT_READY(awaitFinished(task.get()));
 
   EXPECT_EQ(0u, fetcherProcess->cacheSize());
-  ASSERT_SOME(fetcherProcess->cacheFiles(slaveId, flags));
-  EXPECT_EQ(0u, fetcherProcess->cacheFiles(slaveId, flags).get().size());
+  ASSERT_SOME(fetcherProcess->cacheFiles());
+  EXPECT_TRUE(fetcherProcess->cacheFiles()->empty());
 
   const string path = path::join(task->runDirectory.string(), COMMAND_NAME);
   EXPECT_TRUE(isExecutable(path));
@@ -656,8 +695,10 @@ TEST_F(FetcherCacheTest, LocalCached)
     EXPECT_TRUE(os::exists(path + taskName(i)));
 
     EXPECT_EQ(1u, fetcherProcess->cacheSize());
-    ASSERT_SOME(fetcherProcess->cacheFiles(slaveId, flags));
-    EXPECT_EQ(1u, fetcherProcess->cacheFiles(slaveId, flags).get().size());
+    ASSERT_SOME(fetcherProcess->cacheFiles());
+    EXPECT_EQ(1u, fetcherProcess->cacheFiles()->size());
+
+    verifyCacheMetrics();
   }
 }
 
@@ -685,8 +726,10 @@ TEST_F(FetcherCacheTest, CachedCustomFilename)
   AWAIT_READY(awaitFinished(task.get()));
 
   EXPECT_EQ(1u, fetcherProcess->cacheSize());
-  ASSERT_SOME(fetcherProcess->cacheFiles(slaveId, flags));
-  EXPECT_EQ(1u, fetcherProcess->cacheFiles(slaveId, flags).get().size());
+  ASSERT_SOME(fetcherProcess->cacheFiles());
+  EXPECT_EQ(1u, fetcherProcess->cacheFiles()->size());
+
+  verifyCacheMetrics();
 
   // Verify that the downloaded executable lives at our custom output path.
   const string executablePath = path::join(
@@ -727,8 +770,10 @@ TEST_F(FetcherCacheTest, CachedCustomOutputFileWithSubdirectory)
   AWAIT_READY(awaitFinished(task.get()));
 
   EXPECT_EQ(1u, fetcherProcess->cacheSize());
-  ASSERT_SOME(fetcherProcess->cacheFiles(slaveId, flags));
-  EXPECT_EQ(1u, fetcherProcess->cacheFiles(slaveId, flags).get().size());
+  ASSERT_SOME(fetcherProcess->cacheFiles());
+  EXPECT_EQ(1u, fetcherProcess->cacheFiles()->size());
+
+  verifyCacheMetrics();
 
   // Verify that the downloaded executable lives at our custom output file
   // path.
@@ -768,7 +813,7 @@ TEST_F(FetcherCacheTest, CachedFallback)
 
   // Bring back the asset just before running mesos-fetcher to fetch it.
   Future<FetcherInfo> fetcherInfo;
-  EXPECT_CALL(*fetcherProcess, run(_, _, _, _, _))
+  EXPECT_CALL(*fetcherProcess, run(_, _, _, _))
     .WillOnce(DoAll(FutureArg<3>(&fetcherInfo),
                     InvokeWithoutArgs(this,
                                       &FetcherCacheTest::setupCommandFileAsset),
@@ -786,13 +831,15 @@ TEST_F(FetcherCacheTest, CachedFallback)
 
   AWAIT_READY(fetcherInfo);
 
-  ASSERT_EQ(1, fetcherInfo.get().items_size());
+  ASSERT_EQ(1, fetcherInfo->items_size());
   EXPECT_EQ(FetcherInfo::Item::BYPASS_CACHE,
-            fetcherInfo.get().items(0).action());
+            fetcherInfo->items(0).action());
 
   EXPECT_EQ(0u, fetcherProcess->cacheSize());
-  ASSERT_SOME(fetcherProcess->cacheFiles(slaveId, flags));
-  EXPECT_EQ(0u, fetcherProcess->cacheFiles(slaveId, flags).get().size());
+  ASSERT_SOME(fetcherProcess->cacheFiles());
+  EXPECT_TRUE(fetcherProcess->cacheFiles()->empty());
+
+  verifyCacheMetrics();
 }
 
 
@@ -828,8 +875,10 @@ TEST_F(FetcherCacheTest, LocalUncachedExtract)
   EXPECT_TRUE(os::exists(path + taskName(index)));
 
   EXPECT_EQ(0u, fetcherProcess->cacheSize());
-  ASSERT_SOME(fetcherProcess->cacheFiles(slaveId, flags));
-  EXPECT_EQ(0u, fetcherProcess->cacheFiles(slaveId, flags).get().size());
+  ASSERT_SOME(fetcherProcess->cacheFiles());
+  EXPECT_TRUE(fetcherProcess->cacheFiles()->empty());
+
+  verifyCacheMetrics();
 }
 
 
@@ -863,8 +912,10 @@ TEST_F(FetcherCacheTest, LocalCachedExtract)
     EXPECT_TRUE(os::exists(path + taskName(i)));
 
     EXPECT_EQ(1u, fetcherProcess->cacheSize());
-    ASSERT_SOME(fetcherProcess->cacheFiles(slaveId, flags));
-    EXPECT_EQ(1u, fetcherProcess->cacheFiles(slaveId, flags).get().size());
+    ASSERT_SOME(fetcherProcess->cacheFiles());
+    EXPECT_EQ(1u, fetcherProcess->cacheFiles()->size());
+
+    verifyCacheMetrics();
   }
 }
 
@@ -909,7 +960,7 @@ public:
       return "http://" + stringify(self().address) + "/" + self().id + "/";
     }
 
-    // Stalls the execution of future HTTP requests inside visit().
+    // Stalls the execution of future HTTP requests inside consume().
     void pause()
     {
       // If there is no latch or if the existing latch has already been
@@ -926,7 +977,7 @@ public:
       }
     }
 
-    virtual void visit(const HttpEvent& event)
+    virtual void consume(HttpEvent&& event)
     {
       if (latch.get() != nullptr) {
         latch->await();
@@ -942,7 +993,7 @@ public:
         countArchiveRequests++;
       }
 
-      ProcessBase::visit(event);
+      ProcessBase::consume(std::move(event));
     }
 
     void resetCounts()
@@ -1012,8 +1063,10 @@ TEST_F(FetcherCacheHttpTest, HttpCachedSerialized)
     EXPECT_TRUE(os::exists(path + taskName(i)));
 
     EXPECT_EQ(1u, fetcherProcess->cacheSize());
-    ASSERT_SOME(fetcherProcess->cacheFiles(slaveId, flags));
-    EXPECT_EQ(1u, fetcherProcess->cacheFiles(slaveId, flags).get().size());
+    ASSERT_SOME(fetcherProcess->cacheFiles());
+    EXPECT_EQ(1u, fetcherProcess->cacheFiles()->size());
+
+    verifyCacheMetrics();
 
     // 2 requests: 1 for content-length, 1 for download.
     EXPECT_EQ(2u, httpServer->countCommandRequests);
@@ -1062,7 +1115,7 @@ TEST_F(FetcherCacheHttpTest, HttpCachedConcurrent)
   Try<vector<Task>> tasks = launchTasks(commandInfos);
   ASSERT_SOME(tasks);
 
-  CHECK_EQ(countTasks, tasks.get().size());
+  ASSERT_EQ(countTasks, tasks->size());
 
   // Having paused the HTTP server, ensure that FetcherProcess::_fetch()
   // has been called for each task, which means that all tasks are competing
@@ -1077,8 +1130,10 @@ TEST_F(FetcherCacheHttpTest, HttpCachedConcurrent)
   AWAIT_READY(awaitFinished(tasks.get()));
 
   EXPECT_EQ(1u, fetcherProcess->cacheSize());
-  ASSERT_SOME(fetcherProcess->cacheFiles(slaveId, flags));
-  EXPECT_EQ(1u, fetcherProcess->cacheFiles(slaveId, flags).get().size());
+  ASSERT_SOME(fetcherProcess->cacheFiles());
+  EXPECT_EQ(1u, fetcherProcess->cacheFiles()->size());
+
+  verifyCacheMetrics();
 
   // HTTP requests regarding the archive asset as follows. Archive
   // "content-length" requests: 1, archive file downloads: 2.
@@ -1171,7 +1226,7 @@ TEST_F(FetcherCacheHttpTest, HttpMixed)
   Try<vector<Task>> tasks = launchTasks(commandInfos);
   ASSERT_SOME(tasks);
 
-  CHECK_EQ(3u, tasks.get().size());
+  ASSERT_EQ(3u, tasks->size());
 
   // Having paused the HTTP server, ensure that FetcherProcess::_fetch()
   // has been called for each task, which means that all tasks are competing
@@ -1186,8 +1241,10 @@ TEST_F(FetcherCacheHttpTest, HttpMixed)
   AWAIT_READY(awaitFinished(tasks.get()));
 
   EXPECT_EQ(1u, fetcherProcess->cacheSize());
-  ASSERT_SOME(fetcherProcess->cacheFiles(slaveId, flags));
-  EXPECT_EQ(1u, fetcherProcess->cacheFiles(slaveId, flags).get().size());
+  ASSERT_SOME(fetcherProcess->cacheFiles());
+  EXPECT_EQ(1u, fetcherProcess->cacheFiles()->size());
+
+  verifyCacheMetrics();
 
   // HTTP requests regarding the command asset as follows. Command
   // "content-length" requests: 0, command file downloads: 3.
@@ -1273,8 +1330,8 @@ TEST_F(FetcherCacheHttpTest, DISABLED_HttpCachedRecovery)
     EXPECT_TRUE(os::exists(path + taskName(i)));
 
     EXPECT_EQ(1u, fetcherProcess->cacheSize());
-    ASSERT_SOME(fetcherProcess->cacheFiles(slaveId, flags));
-    EXPECT_EQ(1u, fetcherProcess->cacheFiles(slaveId, flags).get().size());
+    ASSERT_SOME(fetcherProcess->cacheFiles());
+    EXPECT_EQ(1u, fetcherProcess->cacheFiles()->size());
 
     // content-length requests: 1
     // downloads: 1
@@ -1289,7 +1346,7 @@ TEST_F(FetcherCacheHttpTest, DISABLED_HttpCachedRecovery)
 
   // Don't reuse the old fetcher, which has stale state after
   // stopping the slave.
-  Fetcher fetcher2;
+  Fetcher fetcher2(flags);
 
   Try<MesosContainerizer*> _containerizer =
     MesosContainerizer::create(flags, true, &fetcher2);
@@ -1309,9 +1366,6 @@ TEST_F(FetcherCacheHttpTest, DISABLED_HttpCachedRecovery)
 
   // Wait until the containerizer is updated.
   AWAIT_READY(update);
-
-  // Recovery must have cleaned the cache by now.
-  EXPECT_FALSE(os::exists(cacheDirectory));
 
   // Repeat of the above to see if it works the same.
   for (size_t i = 0; i < 3; i++) {
@@ -1335,8 +1389,10 @@ TEST_F(FetcherCacheHttpTest, DISABLED_HttpCachedRecovery)
     EXPECT_TRUE(os::exists(path + taskName(i)));
 
     EXPECT_EQ(1u, fetcherProcess->cacheSize());
-    ASSERT_SOME(fetcherProcess->cacheFiles(slaveId, flags));
-    EXPECT_EQ(1u, fetcherProcess->cacheFiles(slaveId, flags).get().size());
+    ASSERT_SOME(fetcherProcess->cacheFiles());
+    EXPECT_EQ(1u, fetcherProcess->cacheFiles()->size());
+
+    verifyCacheMetrics();
 
     // content-length requests: 1
     // downloads: 1
@@ -1387,15 +1443,17 @@ TEST_F(FetcherCacheTest, SimpleEviction)
 
     if (i < countCacheEntries) {
       EXPECT_EQ(i + 1, fetcherProcess->cacheSize());
-      ASSERT_SOME(fetcherProcess->cacheFiles(slaveId, flags));
-      EXPECT_EQ(i+1u, fetcherProcess->cacheFiles(slaveId, flags).get().size());
+      ASSERT_SOME(fetcherProcess->cacheFiles());
+      EXPECT_EQ(i+1u, fetcherProcess->cacheFiles()->size());
     } else {
       EXPECT_EQ(countCacheEntries, fetcherProcess->cacheSize());
-      ASSERT_SOME(fetcherProcess->cacheFiles(slaveId, flags));
+      ASSERT_SOME(fetcherProcess->cacheFiles());
       EXPECT_EQ(countCacheEntries,
-                fetcherProcess->cacheFiles(slaveId, flags).get().size());
+                fetcherProcess->cacheFiles()->size());
     }
   }
+
+  verifyCacheMetrics();
 }
 
 
@@ -1421,7 +1479,7 @@ TEST_F(FetcherCacheTest, FallbackFromEviction)
   Future<FetcherInfo> fetcherInfo0;
   Future<FetcherInfo> fetcherInfo1;
   Future<FetcherInfo> fetcherInfo2;
-  EXPECT_CALL(*fetcherProcess, run(_, _, _, _, _))
+  EXPECT_CALL(*fetcherProcess, run(_, _, _, _))
     .WillOnce(DoAll(FutureArg<3>(&fetcherInfo0),
                     Invoke(fetcherProcess,
                            &MockFetcherProcess::unmocked_run)))
@@ -1465,19 +1523,20 @@ TEST_F(FetcherCacheTest, FallbackFromEviction)
 
   AWAIT_READY(fetcherInfo0);
 
-  ASSERT_EQ(1, fetcherInfo0.get().items_size());
+  ASSERT_EQ(1, fetcherInfo0->items_size());
   EXPECT_EQ(FetcherInfo::Item::DOWNLOAD_AND_CACHE,
-            fetcherInfo0.get().items(0).action());
+            fetcherInfo0->items(0).action());
 
   // We have put a file of size 'COMMAND_SCRIPT.size()' in the cache
   // with space 'COMMAND_SCRIPT.size() + growth'. So we must have 'growth'
   // space left.
-  CHECK_EQ(Bytes(growth), fetcherProcess->availableCacheSpace());
+  ASSERT_EQ(Bytes(growth), fetcherProcess->availableCacheSpace());
 
   EXPECT_EQ(1u, fetcherProcess->cacheSize());
-  ASSERT_SOME(fetcherProcess->cacheFiles(slaveId, flags));
-  EXPECT_EQ(1u, fetcherProcess->cacheFiles(slaveId, flags).get().size());
+  ASSERT_SOME(fetcherProcess->cacheFiles());
+  EXPECT_EQ(1u, fetcherProcess->cacheFiles()->size());
 
+  verifyCacheMetrics();
 
   // Task 1:
 
@@ -1514,17 +1573,18 @@ TEST_F(FetcherCacheTest, FallbackFromEviction)
 
   AWAIT_READY(fetcherInfo1);
 
-  ASSERT_EQ(1, fetcherInfo1.get().items_size());
+  ASSERT_EQ(1, fetcherInfo1->items_size());
   EXPECT_EQ(FetcherInfo::Item::DOWNLOAD_AND_CACHE,
-            fetcherInfo1.get().items(0).action());
+            fetcherInfo1->items(0).action());
 
   // The cache must now be full.
-  CHECK_EQ(Bytes(0u), fetcherProcess->availableCacheSpace());
+  ASSERT_EQ(Bytes(0u), fetcherProcess->availableCacheSpace());
 
   EXPECT_EQ(1u, fetcherProcess->cacheSize());
-  ASSERT_SOME(fetcherProcess->cacheFiles(slaveId, flags));
-  EXPECT_EQ(1u, fetcherProcess->cacheFiles(slaveId, flags).get().size());
+  ASSERT_SOME(fetcherProcess->cacheFiles());
+  EXPECT_EQ(1u, fetcherProcess->cacheFiles()->size());
 
+  verifyCacheMetrics();
 
   // Task 2:
 
@@ -1562,14 +1622,17 @@ TEST_F(FetcherCacheTest, FallbackFromEviction)
 
   AWAIT_READY(fetcherInfo2);
 
-  ASSERT_EQ(1, fetcherInfo2.get().items_size());
+  ASSERT_EQ(1, fetcherInfo2->items_size());
   EXPECT_EQ(FetcherInfo::Item::BYPASS_CACHE,
-            fetcherInfo2.get().items(0).action());
+            fetcherInfo2->items(0).action());
 
   EXPECT_EQ(1u, fetcherProcess->cacheSize());
-  ASSERT_SOME(fetcherProcess->cacheFiles(slaveId, flags));
-  EXPECT_EQ(1u, fetcherProcess->cacheFiles(slaveId, flags).get().size());
+  ASSERT_SOME(fetcherProcess->cacheFiles());
+  EXPECT_EQ(1u, fetcherProcess->cacheFiles()->size());
+
+  verifyCacheMetrics();
 }
+
 
 // Tests LRU cache eviction strategy.
 TEST_F(FetcherCacheTest, RemoveLRUCacheEntries)
@@ -1624,10 +1687,12 @@ TEST_F(FetcherCacheTest, RemoveLRUCacheEntries)
 
   EXPECT_EQ(2u, fetcherProcess->cacheSize());
 
+  verifyCacheMetrics();
+
   // FetcherProcess::cacheFiles returns all cache files that are in the cache
   // directory. We expect cmd1 and cmd2 to be there, cmd0 should have been
   // evicted.
-  Try<list<Path>> cacheFiles = fetcherProcess->cacheFiles(slaveId, flags);
+  Try<list<Path>> cacheFiles = fetcherProcess->cacheFiles();
   ASSERT_SOME(cacheFiles);
 
   bool cmd1Found = false;

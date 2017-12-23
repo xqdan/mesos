@@ -98,7 +98,7 @@ TEST(NsTest, ROOT_setns)
   ASSERT_SOME(s);
 
   // The child should exit 0.
-  AWAIT_EXPECT_WEXITSTATUS_EQ(0, s.get().status());
+  AWAIT_EXPECT_WEXITSTATUS_EQ(0, s->status());
 }
 
 
@@ -161,10 +161,10 @@ TEST(NsTest, ROOT_getns)
   ASSERT_NE(-1, pid);
 
   // Continue in parent.
-  Try<ino_t> nsParent = ns::getns(::getpid(), ns);
+  Result<ino_t> nsParent = ns::getns(::getpid(), ns);
   ASSERT_SOME(nsParent);
 
-  Try<ino_t> nsChild = ns::getns(pid, ns);
+  Result<ino_t> nsChild = ns::getns(pid, ns);
   ASSERT_SOME(nsChild);
 
   // Child should be in a different namespace.
@@ -175,71 +175,6 @@ TEST(NsTest, ROOT_getns)
 
   // Wait for the child process.
   AWAIT_EXPECT_WTERMSIG_EQ(SIGKILL, reap(pid));
-}
-
-
-// Test we can destroy a pid namespace, i.e., kill all processes.
-TEST(NsTest, ROOT_destroy)
-{
-  set<string> namespaces = ns::namespaces();
-
-  if (namespaces.count("pid") == 0) {
-    // Pid namespace is not available.
-    return;
-  }
-
-  Try<int> nstype = ns::nstype("pid");
-  ASSERT_SOME(nstype);
-
-  pid_t pid = os::clone([]() {
-    // Fork a bunch of children.
-    ::fork();
-    ::fork();
-    ::fork();
-
-    // Parent and all children sleep.
-    while (true) { sleep(1); }
-
-    ABORT("Error, child should be killed before reaching here");
-
-    return -1;
-  },
-  SIGCHLD | nstype.get());
-
-  ASSERT_NE(-1, pid);
-
-  // NOTE: need to call `reap` here because the `ns::pid::destroy`
-  // also calls `reap` and so we won't get the right status if we call
-  // `reap` after calling `ns::pid::destroy`.
-  Future<Option<int>> status = reap(pid);
-
-  // Ensure the child is in a different pid namespace.
-  Try<ino_t> childNs = ns::getns(pid, "pid");
-  ASSERT_SOME(childNs);
-
-  Try<ino_t> ourNs = ns::getns(::getpid(), "pid");
-  ASSERT_SOME(ourNs);
-
-  ASSERT_NE(ourNs.get(), childNs.get());
-
-  // Kill the child.
-  AWAIT_READY(ns::pid::destroy(childNs.get()));
-
-  AWAIT_EXPECT_WTERMSIG_EQ(SIGKILL, status);
-
-  // Finally, verify that no processes are in the child's pid
-  // namespace, i.e., destroy() also killed all descendants.
-  Try<set<pid_t>> pids = os::pids();
-  ASSERT_SOME(pids);
-
-  foreach (pid_t pid, pids.get()) {
-    Try<ino_t> otherNs = ns::getns(pid, "pid");
-    // pid may have exited since getting the snapshot of pids so
-    // ignore any error.
-    if (otherNs.isSome()) {
-      ASSERT_SOME_NE(childNs.get(), otherNs);
-    }
-  }
 }
 
 
@@ -282,7 +217,7 @@ TEST(NsTest, ROOT_clone)
       continue;
     }
 
-    Try<ino_t> inode = ns::getns(parent, ns);
+    Result<ino_t> inode = ns::getns(parent, ns);
     ASSERT_SOME(inode);
     EXPECT_SOME_NE(inode.get(), ns::getns(getpid(), ns));
     EXPECT_SOME_EQ(inode.get(), ns::getns(child.get(), ns));

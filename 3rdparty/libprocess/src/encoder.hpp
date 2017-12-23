@@ -16,6 +16,7 @@
 #include <stdint.h>
 #include <time.h>
 
+#include <limits>
 #include <map>
 #include <sstream>
 
@@ -46,7 +47,8 @@ public:
     FILE
   };
 
-  explicit Encoder(const network::Socket& _s) : s(_s) {}
+  Encoder() = default;
+
   virtual ~Encoder() {}
 
   virtual Kind kind() const = 0;
@@ -54,22 +56,14 @@ public:
   virtual void backup(size_t length) = 0;
 
   virtual size_t remaining() const = 0;
-
-  network::Socket socket() const
-  {
-    return s;
-  }
-
-private:
-  const network::Socket s; // The socket this encoder is associated with.
 };
 
 
 class DataEncoder : public Encoder
 {
 public:
-  DataEncoder(const network::Socket& s, const std::string& _data)
-    : Encoder(s), data(_data), index(0) {}
+  DataEncoder(const std::string& _data)
+    : data(_data), index(0) {}
 
   virtual ~DataEncoder() {}
 
@@ -107,54 +101,42 @@ private:
 class MessageEncoder : public DataEncoder
 {
 public:
-  MessageEncoder(const network::Socket& s, Message* _message)
-    : DataEncoder(s, encode(_message)), message(_message) {}
+  MessageEncoder(const Message& message)
+    : DataEncoder(encode(message)) {}
 
-  virtual ~MessageEncoder()
-  {
-    if (message != nullptr) {
-      delete message;
-    }
-  }
-
-  static std::string encode(Message* message)
+  static std::string encode(const Message& message)
   {
     std::ostringstream out;
 
-    if (message != nullptr) {
-      out << "POST ";
-      // Nothing keeps the 'id' component of a PID from being an empty
-      // string which would create a malformed path that has two
-      // '//' unless we check for it explicitly.
-      // TODO(benh): Make the 'id' part of a PID optional so when it's
-      // missing it's clear that we're simply addressing an ip:port.
-      if (message->to.id != "") {
-        out << "/" << message->to.id;
-      }
+    out << "POST ";
+    // Nothing keeps the 'id' component of a PID from being an empty
+    // string which would create a malformed path that has two
+    // '//' unless we check for it explicitly.
+    // TODO(benh): Make the 'id' part of a PID optional so when it's
+    // missing it's clear that we're simply addressing an ip:port.
+    if (message.to.id != "") {
+      out << "/" << message.to.id;
+    }
 
-      out << "/" << message->name << " HTTP/1.1\r\n"
-          << "User-Agent: libprocess/" << message->from << "\r\n"
-          << "Libprocess-From: " << message->from << "\r\n"
-          << "Connection: Keep-Alive\r\n"
-          << "Host: \r\n";
+    out << "/" << message.name << " HTTP/1.1\r\n"
+        << "User-Agent: libprocess/" << message.from << "\r\n"
+        << "Libprocess-From: " << message.from << "\r\n"
+        << "Connection: Keep-Alive\r\n"
+        << "Host: \r\n";
 
-      if (message->body.size() > 0) {
-        out << "Transfer-Encoding: chunked\r\n\r\n"
-            << std::hex << message->body.size() << "\r\n";
-        out.write(message->body.data(), message->body.size());
-        out << "\r\n"
-            << "0\r\n"
-            << "\r\n";
-      } else {
-        out << "\r\n";
-      }
+    if (message.body.size() > 0) {
+      out << "Transfer-Encoding: chunked\r\n\r\n"
+          << std::hex << message.body.size() << "\r\n";
+      out.write(message.body.data(), message.body.size());
+      out << "\r\n"
+          << "0\r\n"
+          << "\r\n";
+    } else {
+      out << "\r\n";
     }
 
     return out.str();
   }
-
-private:
-  Message* message;
 };
 
 
@@ -162,10 +144,9 @@ class HttpResponseEncoder : public DataEncoder
 {
 public:
   HttpResponseEncoder(
-      const network::Socket& s,
       const http::Response& response,
       const http::Request& request)
-    : DataEncoder(s, encode(response, request)) {}
+    : DataEncoder(encode(response, request)) {}
 
   static std::string encode(
       const http::Response& response,
@@ -208,7 +189,8 @@ public:
       if (compressed.isError()) {
         LOG(WARNING) << "Failed to gzip response body: " << compressed.error();
       } else {
-        body = compressed.get();
+        body = std::move(compressed.get());
+
         headers["Content-Length"] = stringify(body.length());
         headers["Content-Encoding"] = "gzip";
       }
@@ -251,8 +233,15 @@ public:
 class FileEncoder : public Encoder
 {
 public:
-  FileEncoder(const network::Socket& s, int _fd, size_t _size)
-    : Encoder(s), fd(_fd), size(_size), index(0) {}
+  FileEncoder(int_fd _fd, size_t _size)
+    : fd(_fd), size(static_cast<off_t>(_size)), index(0)
+  {
+    // NOTE: For files, we expect the size to be derived from `stat`-ing
+    // the file.  The `struct stat` returns the size in `off_t` form,
+    // meaning that it is a programmer error to construct the `FileEncoder`
+    // with a size greater the max value of `off_t`.
+    CHECK_LE(_size, static_cast<size_t>(std::numeric_limits<off_t>::max()));
+  }
 
   virtual ~FileEncoder()
   {
@@ -264,7 +253,7 @@ public:
     return Encoder::FILE;
   }
 
-  virtual int next(off_t* offset, size_t* length)
+  virtual int_fd next(off_t* offset, size_t* length)
   {
     off_t temp = index;
     index = size;
@@ -276,7 +265,7 @@ public:
   virtual void backup(size_t length)
   {
     if (index >= static_cast<off_t>(length)) {
-      index -= length;
+      index -= static_cast<off_t>(length);
     }
   }
 
@@ -286,7 +275,7 @@ public:
   }
 
 private:
-  int fd;
+  int_fd fd;
   off_t size;
   off_t index;
 };

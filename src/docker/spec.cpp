@@ -90,7 +90,9 @@ ostream& operator<<(ostream& stream, const ImageReference& reference)
     stream << reference.repository();
   }
 
-  if (reference.has_tag()) {
+  if (reference.has_digest()) {
+    stream << "@" << reference.digest();
+  } else if (reference.has_tag()) {
     stream << ":" << reference.tag();
   }
 
@@ -192,6 +194,17 @@ Try<hashmap<string, Config::Auth>> parseAuthConfig(
   }
 
   return result;
+}
+
+
+Try<hashmap<string, Config::Auth>> parseAuthConfig(const string& s)
+{
+  Try<JSON::Object> json = JSON::parse<JSON::Object>(s);
+  if (json.isError()) {
+    return Error("JSON parse failed: " + json.error());
+  }
+
+  return parseAuthConfig(json.get());
 }
 
 
@@ -328,10 +341,6 @@ Option<Error> validate(const ImageManifest& manifest)
 
   if (manifest.history_size() <= 0) {
     return Error("'history' field size must be at least one");
-  }
-
-  if (manifest.signatures_size() <= 0) {
-    return Error("'signatures' field size must be at least one");
   }
 
   // Verify that blobSum and v1Compatibility numbers are equal.

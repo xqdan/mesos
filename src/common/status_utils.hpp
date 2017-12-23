@@ -22,26 +22,40 @@
 #include <stout/option.hpp>
 #include <stout/stringify.hpp>
 
+// Return whether the wait(2) status was a successful process exit.
+inline bool WSUCCEEDED(int status)
+{
+  return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
+
 inline std::string WSTRINGIFY(int status)
 {
-#ifdef __WINDOWS__
-  // On Windows the exit codes are not standardized. The behaviour should
-  // be defined to improve the diagnostic based on logs.
-  // TODO(dpravat): MESOS-5417 tracks this improvement.
-  LOG(WARNING) << "`WSTRINGIFY` has been called, but it is not implemented.";
-
-  return "";
-#else
   std::string message;
+#ifdef __WINDOWS__
+  // NOTE: On Windows, exit codes are not standardized, so we cannot
+  // treat any exit codes differently.
+  message += "exited with status ";
+  message += stringify(status);
+#else
   if (WIFEXITED(status)) {
     message += "exited with status ";
     message += stringify(WEXITSTATUS(status));
-  } else {
+  } else if (WIFSIGNALED(status)) {
     message += "terminated with signal ";
     message += strsignal(WTERMSIG(status));
+    if (WCOREDUMP(status)) {
+      message += " (core dumped)";
+    }
+  } else if (WIFSTOPPED(status)) {
+    message += "stopped on signal ";
+    message += strsignal(WSTOPSIG(status));
+  } else {
+    message += "wait status ";
+    message += stringify(status);
   }
-  return message;
 #endif // __WINDOWS__
+  return message;
 }
 
 #endif // __STATUS_UTILS_HPP__

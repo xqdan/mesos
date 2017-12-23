@@ -18,6 +18,10 @@
 
 #include <glog/logging.h>
 
+#include <mesos/appc/spec.hpp>
+
+#include <mesos/secret/resolver.hpp>
+
 #include <process/collect.hpp>
 #include <process/defer.hpp>
 #include <process/dispatch.hpp>
@@ -28,14 +32,12 @@
 #include <stout/os.hpp>
 #include <stout/path.hpp>
 
-#include <mesos/appc/spec.hpp>
+#include <stout/os/realpath.hpp>
 
 #include "slave/containerizer/mesos/provisioner/appc/cache.hpp"
 #include "slave/containerizer/mesos/provisioner/appc/fetcher.hpp"
 #include "slave/containerizer/mesos/provisioner/appc/paths.hpp"
 #include "slave/containerizer/mesos/provisioner/appc/store.hpp"
-
-using namespace process;
 
 namespace spec = appc::spec;
 
@@ -43,7 +45,17 @@ using std::list;
 using std::string;
 using std::vector;
 
+using process::Failure;
+using process::Future;
 using process::Owned;
+using process::Process;
+using process::Promise;
+
+using process::defer;
+using process::dispatch;
+using process::spawn;
+using process::terminate;
+using process::wait;
 
 namespace mesos {
 namespace internal {
@@ -88,7 +100,9 @@ private:
 };
 
 
-Try<Owned<slave::Store>> Store::create(const Flags& flags)
+Try<Owned<slave::Store>> Store::create(
+    const Flags& flags,
+    SecretResolver* secretResolver)
 {
   Try<Nothing> mkdir = os::mkdir(paths::getImagesDir(flags.appc_store_dir));
   if (mkdir.isError()) {
@@ -154,7 +168,7 @@ Future<Nothing> Store::recover()
 }
 
 
-Future<ImageInfo> Store::get(const Image& image)
+Future<ImageInfo> Store::get(const Image& image, const string& backend)
 {
   return dispatch(process.get(), &StoreProcess::get, image);
 }

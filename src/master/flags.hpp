@@ -17,6 +17,8 @@
 #ifndef __MASTER_FLAGS_HPP__
 #define __MASTER_FLAGS_HPP__
 
+#include <cstdint>
+
 #include <string>
 
 #include <stout/duration.hpp>
@@ -79,6 +81,7 @@ public:
   std::string authenticators;
   std::string allocator;
   Option<std::set<std::string>> fair_sharing_excluded_resource_names;
+  bool filter_gpu_resources;
   Option<std::string> hooks;
   Duration agent_ping_timeout;
   size_t max_agent_ping_timeouts;
@@ -87,15 +90,31 @@ public:
   Option<std::string> http_framework_authenticators;
   size_t max_completed_frameworks;
   size_t max_completed_tasks_per_framework;
+  size_t max_unreachable_tasks_per_framework;
   Option<std::string> master_contender;
   Option<std::string> master_detector;
   Duration registry_gc_interval;
   Duration registry_max_agent_age;
   size_t registry_max_agent_count;
+  Option<DomainInfo> domain;
 
-#ifdef WITH_NETWORK_ISOLATOR
+  // The following flags are executable specific (e.g., since we only
+  // have one instance of libprocess per execution, we only want to
+  // advertise the IP and port option once, here).
+
+  Option<std::string> ip;
+  uint16_t port;
+  Option<std::string> advertise_ip;
+  Option<std::string> advertise_port;
+  Option<std::string> zk;
+
+  // Optional IP discover script that will set the Master IP.
+  // If set, its output is expected to be a valid parseable IP string.
+  Option<std::string> ip_discovery_command;
+
+#ifdef ENABLE_PORT_MAPPING_ISOLATOR
   Option<size_t> max_executors_per_agent;
-#endif  // WITH_NETWORK_ISOLATOR
+#endif  // ENABLE_PORT_MAPPING_ISOLATOR
 };
 
 } // namespace master {

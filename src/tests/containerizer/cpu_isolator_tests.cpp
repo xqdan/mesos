@@ -51,10 +51,14 @@ class CpuIsolatorTest
 
 // These tests are parameterized by the isolation flag.
 static vector<string>* isolators = new vector<string>({
+#ifndef __WINDOWS__
   "posix/cpu",
 #ifdef __linux__
   "cgroups/cpu",
 #endif // __linux__
+#else
+  "windows/cpu",
+#endif // __WINDOWS__
 });
 
 
@@ -72,7 +76,7 @@ TEST_P(CpuIsolatorTest, ROOT_UserCpuUsage)
   slave::Flags flags = CreateSlaveFlags();
   flags.isolation = GetParam();
 
-  Fetcher fetcher;
+  Fetcher fetcher(flags);
 
   Try<MesosContainerizer*> _containerizer =
     MesosContainerizer::create(flags, true, &fetcher);
@@ -96,8 +100,7 @@ TEST_P(CpuIsolatorTest, ROOT_UserCpuUsage)
       master.get()->pid,
       DEFAULT_CREDENTIAL);
 
-  EXPECT_CALL(sched, registered(&driver, _, _))
-    .Times(1);
+  EXPECT_CALL(sched, registered(&driver, _, _));
 
   Future<vector<Offer>> offers;
   EXPECT_CALL(sched, resourceOffers(&driver, _))
@@ -107,28 +110,38 @@ TEST_P(CpuIsolatorTest, ROOT_UserCpuUsage)
   driver.start();
 
   AWAIT_READY(offers);
-  EXPECT_NE(0u, offers.get().size());
+  ASSERT_FALSE(offers->empty());
 
   // Max out a single core in userspace. This will run for at most one
   // second.
   TaskInfo task = createTask(
       offers.get()[0],
-      "while true ; do true ; done & sleep 60");
+#ifdef __WINDOWS__
+      "powershell -c \"while ($true) {}\""
+#else
+      "while true ; do true ; done & sleep 60"
+#endif // __WINDOWS__
+    );
 
+  Future<TaskStatus> statusStarting;
   Future<TaskStatus> statusRunning;
   EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&statusStarting))
     .WillOnce(FutureArg<1>(&statusRunning));
 
   driver.launchTasks(offers.get()[0].id(), {task});
 
+  AWAIT_READY(statusStarting);
+  EXPECT_EQ(TASK_STARTING, statusStarting->state());
+
   AWAIT_READY(statusRunning);
-  EXPECT_EQ(TASK_RUNNING, statusRunning.get().state());
+  EXPECT_EQ(TASK_RUNNING, statusRunning->state());
 
   Future<hashset<ContainerID>> containers = containerizer->containers();
   AWAIT_READY(containers);
-  EXPECT_EQ(1u, containers.get().size());
+  ASSERT_EQ(1u, containers->size());
 
-  ContainerID containerId = *(containers.get().begin());
+  ContainerID containerId = *(containers->begin());
 
   // Wait up to 1 second for the child process to induce 1/8 of a
   // second of user cpu time.
@@ -156,7 +169,10 @@ TEST_P(CpuIsolatorTest, ROOT_UserCpuUsage)
 }
 
 
-TEST_P(CpuIsolatorTest, ROOT_SystemCpuUsage)
+// TODO(andschwa): Enable this test when a command can be found that does not
+// cause a flaky test. As it is, it is difficult to consume kernel time on
+// Windows consistently.
+TEST_P_TEMP_DISABLED_ON_WINDOWS(CpuIsolatorTest, ROOT_SystemCpuUsage)
 {
   Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
@@ -164,7 +180,7 @@ TEST_P(CpuIsolatorTest, ROOT_SystemCpuUsage)
   slave::Flags flags = CreateSlaveFlags();
   flags.isolation = GetParam();
 
-  Fetcher fetcher;
+  Fetcher fetcher(flags);
 
   Try<MesosContainerizer*> _containerizer =
     MesosContainerizer::create(flags, true, &fetcher);
@@ -188,8 +204,7 @@ TEST_P(CpuIsolatorTest, ROOT_SystemCpuUsage)
       master.get()->pid,
       DEFAULT_CREDENTIAL);
 
-  EXPECT_CALL(sched, registered(&driver, _, _))
-    .Times(1);
+  EXPECT_CALL(sched, registered(&driver, _, _));
 
   Future<vector<Offer>> offers;
   EXPECT_CALL(sched, resourceOffers(&driver, _))
@@ -199,32 +214,44 @@ TEST_P(CpuIsolatorTest, ROOT_SystemCpuUsage)
   driver.start();
 
   AWAIT_READY(offers);
-  EXPECT_NE(0u, offers.get().size());
+  ASSERT_FALSE(offers->empty());
 
-  // Generating random numbers is done by the kernel and will max out
-  // a single core and run almost exclusively in the kernel, i.e.,
-  // system time.
   TaskInfo task = createTask(
       offers.get()[0],
-      "cat /dev/urandom > /dev/null & sleep 60");
+#ifdef __WINDOWS__
+      // Enumerating processes will at least cause some kernel time.
+      "powershell -NoProfile -Command "
+      "\"while ($true) { Get-Process | Out-Null }\""
+#else
+      // Generating random numbers is done by the kernel and will max out
+      // a single core and run almost exclusively in the kernel, i.e.,
+      // system time.
+      "cat /dev/urandom > /dev/null & sleep 60"
+#endif // __WINDOWS__
+    );
 
+  Future<TaskStatus> statusStarting;
   Future<TaskStatus> statusRunning;
   EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&statusStarting))
     .WillOnce(FutureArg<1>(&statusRunning));
 
   driver.launchTasks(offers.get()[0].id(), {task});
 
+  AWAIT_READY(statusStarting);
+  EXPECT_EQ(TASK_STARTING, statusStarting->state());
+
   AWAIT_READY(statusRunning);
-  EXPECT_EQ(TASK_RUNNING, statusRunning.get().state());
+  EXPECT_EQ(TASK_RUNNING, statusRunning->state());
 
   Future<hashset<ContainerID>> containers = containerizer->containers();
   AWAIT_READY(containers);
-  EXPECT_EQ(1u, containers.get().size());
+  ASSERT_EQ(1u, containers->size());
 
-  ContainerID containerId = *(containers.get().begin());
+  ContainerID containerId = *(containers->begin());
 
-  // Wait up to 1 second for the child process to induce 1/8 of a
-  // second of user cpu time.
+  // Wait up to 1 seconds for the child process to induce 1/8 of a
+  // second of system cpu time.
   ResourceStatistics statistics;
   Duration waited = Duration::zero();
   do {

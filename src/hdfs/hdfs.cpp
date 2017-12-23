@@ -31,9 +31,11 @@
 #include <stout/path.hpp>
 #include <stout/strings.hpp>
 
+#include <stout/os/constants.hpp>
 #include <stout/os/exists.hpp>
 #include <stout/os/shell.hpp>
 
+#include "common/status_utils.hpp"
 #include "hdfs/hdfs.hpp"
 
 using namespace process;
@@ -63,21 +65,21 @@ static Future<CommandResult> result(const Subprocess& s)
         Future<Option<int>>,
         Future<string>,
         Future<string>>& t) -> Future<CommandResult> {
-      Future<Option<int>> status = std::get<0>(t);
+      const Future<Option<int>>& status = std::get<0>(t);
       if (!status.isReady()) {
         return Failure(
             "Failed to get the exit status of the subprocess: " +
             (status.isFailed() ? status.failure() : "discarded"));
       }
 
-      Future<string> output = std::get<1>(t);
+      const Future<string>& output = std::get<1>(t);
       if (!output.isReady()) {
         return Failure(
             "Failed to read stdout from the subprocess: " +
             (output.isFailed() ? output.failure() : "discarded"));
       }
 
-      Future<string> error = std::get<2>(t);
+      const Future<string>& error = std::get<2>(t);
       if (!error.isReady()) {
         return Failure(
             "Failed to read stderr from the subprocess: " +
@@ -113,9 +115,22 @@ Try<Owned<HDFS>> HDFS::create(const Option<string>& _hadoop)
   }
 
   // Check if the hadoop client is available.
-  Try<string> out = os::shell(hadoop + " version 2>&1");
-  if (out.isError()) {
-    return Error(out.error());
+  Try<Subprocess> subprocess = process::subprocess(hadoop + " version 2>&1");
+
+  if (subprocess.isError()) {
+    return Error("Failed to exec hadoop subprocess: " + subprocess.error());
+  }
+
+  Option<int> status = subprocess->status().get();
+  if (status.isNone()) {
+    return Error("No status found for 'hadoop version' command");
+  }
+
+  // Check the final status of the command
+  if (status.get() != 0) {
+    return Error(
+        "Hadoop client is not available, exit status: " +
+        stringify(status.get()));
   }
 
   return Owned<HDFS>(new HDFS(hadoop));
@@ -142,7 +157,7 @@ Future<bool> HDFS::exists(const string& path)
   Try<Subprocess> s = subprocess(
       hadoop,
       {"hadoop", "fs", "-test", "-e", normalize(path)},
-      Subprocess::PATH("/dev/null"),
+      Subprocess::PATH(os::DEV_NULL),
       Subprocess::PIPE(),
       Subprocess::PIPE());
 
@@ -156,18 +171,18 @@ Future<bool> HDFS::exists(const string& path)
         return Failure("Failed to reap the subprocess");
       }
 
-      if (WIFEXITED(result.status.get())) {
-        int exitCode = WEXITSTATUS(result.status.get());
-        if (exitCode == 0) {
-          return true;
-        } else if (exitCode == 1) {
-          return false;
-        }
+      if (WSUCCEEDED(result.status.get())) {
+        return true;
+      }
+
+      if (WIFEXITED(result.status.get()) &&
+          WEXITSTATUS(result.status.get()) == 1) {
+        return false;
       }
 
       return Failure(
           "Unexpected result from the subprocess: "
-          "status='" + stringify(result.status.get()) + "', " +
+          "status='" + WSTRINGIFY(result.status.get()) + "', " +
           "stdout='" + result.out + "', " +
           "stderr='" + result.err + "'");
     });
@@ -181,7 +196,7 @@ Future<Bytes> HDFS::du(const string& _path)
   Try<Subprocess> s = subprocess(
       hadoop,
       {"hadoop", "fs", "-du", path},
-      Subprocess::PATH("/dev/null"),
+      Subprocess::PATH(os::DEV_NULL),
       Subprocess::PIPE(),
       Subprocess::PIPE());
 
@@ -234,7 +249,7 @@ Future<Nothing> HDFS::rm(const string& path)
   Try<Subprocess> s = subprocess(
       hadoop,
       {"hadoop", "fs", "-rm", normalize(path)},
-      Subprocess::PATH("/dev/null"),
+      Subprocess::PATH(os::DEV_NULL),
       Subprocess::PIPE(),
       Subprocess::PIPE());
 
@@ -270,7 +285,7 @@ Future<Nothing> HDFS::copyFromLocal(const string& from, const string& to)
   Try<Subprocess> s = subprocess(
       hadoop,
       {"hadoop", "fs", "-copyFromLocal", from, normalize(to)},
-      Subprocess::PATH("/dev/null"),
+      Subprocess::PATH(os::DEV_NULL),
       Subprocess::PIPE(),
       Subprocess::PIPE());
 
@@ -302,7 +317,7 @@ Future<Nothing> HDFS::copyToLocal(const string& from, const string& to)
   Try<Subprocess> s = subprocess(
       hadoop,
       {"hadoop", "fs", "-copyToLocal", normalize(from), to},
-      Subprocess::PATH("/dev/null"),
+      Subprocess::PATH(os::DEV_NULL),
       Subprocess::PIPE(),
       Subprocess::PIPE());
 

@@ -226,10 +226,7 @@ TEST(FlagsTest, Flags)
 }
 
 
-// TODO(hausdorff): Enable this test on Windows. Currently setting an
-// environment variable to the blank string will cause the environment variable
-// to be deleted on Windows. See MESOS-5880.
-TEST_TEMP_DISABLED_ON_WINDOWS(FlagsTest, LoadFromEnvironment)
+TEST(FlagsTest, LoadFromEnvironment)
 {
   TestFlagsBase flags;
 
@@ -241,7 +238,7 @@ TEST_TEMP_DISABLED_ON_WINDOWS(FlagsTest, LoadFromEnvironment)
 
   Try<Warnings> load = flags.load("FLAGSTEST_");
   EXPECT_SOME(load);
-  EXPECT_EQ(0u, load->warnings.size());
+  EXPECT_TRUE(load->warnings.empty());
 
   EXPECT_EQ("billy joel", flags.name1);
   EXPECT_EQ(43, flags.name2);
@@ -274,7 +271,7 @@ TEST(FlagsTest, LoadFromCommandLine)
 
   Try<Warnings> load = flags.load("FLAGSTEST_", arraySize(argv), argv);
   EXPECT_SOME(load);
-  EXPECT_EQ(0u, load->warnings.size());
+  EXPECT_TRUE(load->warnings.empty());
 
   EXPECT_EQ("billy joel", flags.name1);
   EXPECT_EQ(43, flags.name2);
@@ -306,7 +303,7 @@ TEST(FlagsTest, LoadFromCommandLineWithNonFlags)
 
   Try<Warnings> load = flags.load("FLAGSTEST_", arraySize(argv), argv);
   EXPECT_SOME(load);
-  EXPECT_EQ(0u, load->warnings.size());
+  EXPECT_TRUE(load->warnings.empty());
 
   EXPECT_EQ("billy joel", flags.name1);
   EXPECT_EQ(43, flags.name2);
@@ -338,7 +335,7 @@ TEST(FlagsTest, LoadFromCommandLineWithDashDash)
 
   Try<Warnings> load = flags.load("FLAGSTEST_", arraySize(argv), argv);
   EXPECT_SOME(load);
-  EXPECT_EQ(0u, load->warnings.size());
+  EXPECT_TRUE(load->warnings.empty());
 
   EXPECT_EQ("billy joel", flags.name1);
   EXPECT_EQ(43, flags.name2);
@@ -373,7 +370,7 @@ TEST(FlagsTest, LoadFromCommandLineAndUpdateArgcArgv)
 
   Try<Warnings> load = flags.load("FLAGSTEST_", &argc, &_argv);
   EXPECT_SOME(load);
-  EXPECT_EQ(0u, load->warnings.size());
+  EXPECT_TRUE(load->warnings.empty());
 
   EXPECT_EQ("billy joel", flags.name1);
   EXPECT_EQ(43, flags.name2);
@@ -524,9 +521,7 @@ TEST(FlagsTest, DeprecationWarning)
 }
 
 
-// TODO(hausdorff): Enable this test on Windows. Currently `flags::parse`
-// assumes filesystems are rooted at '/'. See MESOS-5937.
-TEST_TEMP_DISABLED_ON_WINDOWS(FlagsTest, DuplicatesFromEnvironment)
+TEST(FlagsTest, DuplicatesFromEnvironment)
 {
   TestFlagsBase flags;
 
@@ -541,7 +536,7 @@ TEST_TEMP_DISABLED_ON_WINDOWS(FlagsTest, DuplicatesFromEnvironment)
   // `load(prefix, argc, argv)`.
   Try<Warnings> load = flags.load("FLAGSTEST_", arraySize(argv), argv);
   EXPECT_SOME(load);
-  EXPECT_EQ(0u, load->warnings.size());
+  EXPECT_TRUE(load->warnings.empty());
 
   // The environment variables are overwritten by command line flags.
   EXPECT_EQ(flags.name1, "billy joel");
@@ -555,7 +550,7 @@ TEST_TEMP_DISABLED_ON_WINDOWS(FlagsTest, DuplicatesFromEnvironment)
     // `load(map<string, string>, unknowns, prefix)`.
     load = flags.load(values, false, "FLAGSTEST_");
     EXPECT_SOME(load);
-    EXPECT_EQ(0u, load->warnings.size());
+    EXPECT_TRUE(load->warnings.empty());
 
     EXPECT_EQ(flags.name1, "billy joel");
     EXPECT_EQ(flags.name2, 50);
@@ -571,7 +566,7 @@ TEST_TEMP_DISABLED_ON_WINDOWS(FlagsTest, DuplicatesFromEnvironment)
     load = flags.load(values, false, "FLAGSTEST_");
 
     EXPECT_SOME(load);
-    EXPECT_EQ(0u, load->warnings.size());
+    EXPECT_TRUE(load->warnings.empty());
 
     EXPECT_EQ(flags.name1, "billy joel");
     EXPECT_EQ(flags.name2, 51);
@@ -890,6 +885,29 @@ TEST(FlagsTest, OptionalMessage)
 }
 
 
+TEST(FlagsTest, BuildEnvironment)
+{
+  TestFlagsBase flags;
+  flags.name4 = true;
+
+  map<string, string> environment = flags.buildEnvironment("PREFIX_");
+
+  ASSERT_EQ(1u, environment.count("PREFIX_NAME1"));
+  EXPECT_EQ("ben folds", environment["PREFIX_NAME1"]);
+
+  ASSERT_EQ(1u, environment.count("PREFIX_NAME2"));
+  EXPECT_EQ("42", environment["PREFIX_NAME2"]);
+
+  ASSERT_EQ(1u, environment.count("PREFIX_NAME3"));
+  EXPECT_EQ("false", environment["PREFIX_NAME3"]);
+
+  ASSERT_EQ(1u, environment.count("PREFIX_NAME4"));
+  EXPECT_EQ("true", environment["PREFIX_NAME4"]);
+
+  EXPECT_EQ(0u, environment.count("PREFIX_NAME5"));
+}
+
+
 TEST(FlagsTest, Duration)
 {
   class TestFlags : public virtual FlagsBase
@@ -955,9 +973,10 @@ TEST(FlagsTest, JSON)
 class FlagsFileTest : public TemporaryDirectoryTest {};
 
 
-// TODO(hausdorff): Enable this test on Windows. Currently `flags::parse`
-// assumes filesystems are rooted at '/'. See MESOS-5937.
-TEST_F_TEMP_DISABLED_ON_WINDOWS(FlagsFileTest, JSONFile)
+#ifndef __WINDOWS__
+// This tests deprecated code that pre-dates Windows support for Mesos.
+// Hence, we should not build or enable this test on Windows.
+TEST_F(FlagsFileTest, JSONFile)
 {
   class TestFlags : public virtual FlagsBase
   {
@@ -992,6 +1011,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(FlagsFileTest, JSONFile)
 
   ASSERT_SOME_EQ(object, flags.json);
 }
+#endif // __WINDOWS__
 
 
 TEST_F(FlagsFileTest, FilePrefix)

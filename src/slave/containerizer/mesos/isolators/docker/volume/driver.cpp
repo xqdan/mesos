@@ -22,6 +22,7 @@
 
 #include <stout/stringify.hpp>
 
+#include <stout/os/constants.hpp>
 #include <stout/os/killtree.hpp>
 
 #include "common/status_utils.hpp"
@@ -46,7 +47,7 @@ namespace docker {
 namespace volume {
 
 constexpr Duration MOUNT_TIMEOUT = Seconds(120);
-constexpr Duration UNMOUNT_TIMEOUT = Seconds(120);
+constexpr Duration UNMOUNT_TIMEOUT = Minutes(10);
 
 Try<Owned<DriverClient>> DriverClient::create(
     const string& dvdcli)
@@ -85,7 +86,7 @@ Future<string> DriverClient::mount(
   Try<Subprocess> s = subprocess(
       dvdcli,
       argv,
-      Subprocess::PATH("/dev/null"),
+      Subprocess::PATH(os::DEV_NULL),
       Subprocess::PIPE(),
       Subprocess::PIPE(),
       nullptr,
@@ -106,7 +107,7 @@ Future<string> DriverClient::mount(
         Future<Option<int>>,
         Future<string>,
         Future<string>>& t) -> Future<string> {
-      Future<Option<int>> status = std::get<0>(t);
+      const Future<Option<int>>& status = std::get<0>(t);
       if (!status.isReady()) {
         return Failure(
             "Failed to get the exit status of the subprocess: " +
@@ -118,7 +119,7 @@ Future<string> DriverClient::mount(
       }
 
       if (status->get() != 0) {
-        Future<string> error = std::get<2>(t);
+        const Future<string>& error = std::get<2>(t);
         if (!error.isReady()) {
           return Failure(
               "Unexpected termination of the subprocess: " +
@@ -129,7 +130,7 @@ Future<string> DriverClient::mount(
             "Unexpected termination of the subprocess: " + error.get());
       }
 
-      Future<string> output = std::get<1>(t);
+      const Future<string>& output = std::get<1>(t);
       if (!output.isReady()) {
          return Failure(
             "Failed to read stdout from the subprocess: " +
@@ -169,7 +170,7 @@ Future<Nothing> DriverClient::unmount(
   Try<Subprocess> s = subprocess(
       dvdcli,
       argv,
-      Subprocess::PATH("/dev/null"),
+      Subprocess::PATH(os::DEV_NULL),
       Subprocess::PIPE(),
       Subprocess::PIPE(),
       nullptr,
@@ -188,7 +189,7 @@ Future<Nothing> DriverClient::unmount(
     .then([](const tuple<
         Future<Option<int>>,
         Future<string>>& t) -> Future<Nothing> {
-      Future<Option<int>> status = std::get<0>(t);
+      const Future<Option<int>>& status = std::get<0>(t);
       if (!status.isReady()) {
         return Failure(
             "Failed to get the exit status of the subprocess: " +
@@ -200,7 +201,7 @@ Future<Nothing> DriverClient::unmount(
       }
 
       if (status->get() != 0) {
-        Future<string> error = std::get<1>(t);
+        const Future<string>& error = std::get<1>(t);
         if (!error.isReady()) {
           return Failure(
             "Unexpected termination of the subprocess: " +

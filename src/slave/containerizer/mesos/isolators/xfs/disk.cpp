@@ -103,8 +103,21 @@ static Option<Bytes> getDiskResource(
 
 Try<Isolator*> XfsDiskIsolatorProcess::create(const Flags& flags)
 {
-  if (!xfs::pathIsXfs(flags.work_dir)) {
+  if (!xfs::isPathXfs(flags.work_dir)) {
     return Error("'" + flags.work_dir + "' is not an XFS filesystem");
+  }
+
+  Try<bool> enabled = xfs::isQuotaEnabled(flags.work_dir);
+  if (enabled.isError()) {
+    return Error(
+        "Failed to get quota status for '" +
+        flags.work_dir + "': " + enabled.error());
+  }
+
+  if (!enabled.get()) {
+    return Error(
+        "XFS project quotas are not enabled on '" +
+        flags.work_dir + "'");
   }
 
   Result<uid_t> uid = os::getuid();
@@ -120,8 +133,7 @@ Try<Isolator*> XfsDiskIsolatorProcess::create(const Flags& flags)
   if (projects.isError()) {
     return Error(
         "Failed to parse XFS project range '" +
-        flags.xfs_project_range +
-        "'");
+        flags.xfs_project_range + "'");
   }
 
   if (projects.get().type() != Value::RANGES) {
@@ -144,16 +156,23 @@ Try<Isolator*> XfsDiskIsolatorProcess::create(const Flags& flags)
     return Error(status->message);
   }
 
+  xfs::QuotaPolicy quotaPolicy =
+    flags.enforce_container_disk_quota ? xfs::QuotaPolicy::ENFORCING
+                                       : xfs::QuotaPolicy::ACCOUNTING;
+
   return new MesosIsolator(Owned<MesosIsolatorProcess>(
-      new XfsDiskIsolatorProcess(flags, totalProjectIds.get())));
+      new XfsDiskIsolatorProcess(
+          quotaPolicy, flags.work_dir, totalProjectIds.get())));
 }
 
 
 XfsDiskIsolatorProcess::XfsDiskIsolatorProcess(
-    const Flags& _flags,
+    xfs::QuotaPolicy _quotaPolicy,
+    const std::string& _workDir,
     const IntervalSet<prid_t>& projectIds)
   : ProcessBase(process::ID::generate("xfs-disk-isolator")),
-    flags(_flags),
+    quotaPolicy(_quotaPolicy),
+    workDir(_workDir),
     totalProjectIds(projectIds),
     freeProjectIds(projectIds)
 {
@@ -176,7 +195,7 @@ Future<Nothing> XfsDiskIsolatorProcess::recover(
   // for project IDs that we have not recovered and make a best effort to
   // remove all the corresponding on-disk state.
   Try<list<string>> sandboxes = os::glob(path::join(
-      paths::getSandboxRootDir(flags.work_dir),
+      paths::getSandboxRootDir(workDir),
       "*",
       "frameworks",
       "*",
@@ -272,7 +291,7 @@ Future<Option<ContainerLaunchInfo>> XfsDiskIsolatorProcess::prepare(
   LOG(INFO) << "Assigned project " << stringify(projectId.get()) << " to '"
             << containerConfig.directory() << "'";
 
-  return update(containerId, containerConfig.executor_info().resources())
+  return update(containerId, containerConfig.resources())
     .then([]() -> Future<Option<ContainerLaunchInfo>> {
       return None();
     });
@@ -310,23 +329,37 @@ Future<Nothing> XfsDiskIsolatorProcess::update(
     return Nothing();
   }
 
-  // Only update the disk quota if it has changed.
-  if (needed.get() != info->quota) {
-    Try<Nothing> status =
-      xfs::setProjectQuota(info->directory, info->projectId, needed.get());
+  switch (quotaPolicy) {
+    case xfs::QuotaPolicy::ACCOUNTING: {
+      Try<Nothing> status = xfs::clearProjectQuota(
+          info->directory, info->projectId);
 
-    if (status.isError()) {
-      return Failure("Failed to update quota for project " +
-                     stringify(info->projectId) + ": " + status.error());
+      if (status.isError()) {
+        return Failure("Failed to clear quota for project " +
+                       stringify(info->projectId) + ": " + status.error());
+      }
+
+      break;
     }
 
-    info->quota = needed.get();
+    case xfs::QuotaPolicy::ENFORCING: {
+      Try<Nothing> status = xfs::setProjectQuota(
+          info->directory, info->projectId, needed.get());
 
-    LOG(INFO) << "Set quota on container " << containerId
-              << " for project " << info->projectId
-              << " to " << info->quota;
+      if (status.isError()) {
+        return Failure("Failed to update quota for project " +
+                       stringify(info->projectId) + ": " + status.error());
+      }
+
+      LOG(INFO) << "Set quota on container " << containerId
+                << " for project " << info->projectId
+                << " to " << needed.get();
+
+      break;
+    }
   }
 
+  info->quota = needed.get();
   return Nothing();
 }
 
@@ -349,9 +382,14 @@ Future<ResourceStatistics> XfsDiskIsolatorProcess::usage(
     return Failure(quota.error());
   }
 
+  // If we didn't set the quota (ie. we are in ACCOUNTING mode),
+  // the quota limit will be 0. Since we are already tracking
+  // what the quota ought to be in the Info, we just always
+  // use that.
+  statistics.set_disk_limit_bytes(info->quota.bytes());
+
   if (quota.isSome()) {
-    statistics.set_disk_limit_bytes(quota.get().limit.bytes());
-    statistics.set_disk_used_bytes(quota.get().used.bytes());
+    statistics.set_disk_used_bytes(quota->used.bytes());
   }
 
   return statistics;
@@ -418,6 +456,7 @@ Option<prid_t> XfsDiskIsolatorProcess::nextProjectId()
   freeProjectIds -= projectId;
   return projectId;
 }
+
 
 void XfsDiskIsolatorProcess::returnProjectId(
     prid_t projectId)

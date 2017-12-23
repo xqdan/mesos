@@ -14,31 +14,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# SOURCE FILES FOR THE CONTAINERIZER.
-#####################################
-set(CONTAINERIZER_EXECUTABLE_SRC
-  ${CONTAINERIZER_EXECUTABLE_SRC}
-  main.cpp
-  )
-
-# INCLUDE DIRECTIVES FOR CONTAINERIZER EXECUTABLE (generates, e.g.,
-# -I/path/to/thing on Linux).
-###################################################################
-include_directories(${AGENT_INCLUDE_DIRS})
-
-# LINKING LIBRARIES BY DIRECTORY (might generate, e.g., -L/path/to/thing on
-# Linux).
-###########################################################################
-link_directories(${AGENT_LIB_DIRS})
-
 # THE CONTAINERIZER EXECUTABLE.
 ###############################
-add_executable(${MESOS_CONTAINERIZER} ${CONTAINERIZER_EXECUTABLE_SRC})
+add_executable(mesos-containerizer main.cpp)
+target_link_libraries(mesos-containerizer PRIVATE mesos)
 
-# ADD LINKER FLAGS (generates, e.g., -lglog on Linux).
-######################################################
-target_link_libraries(${MESOS_CONTAINERIZER} ${AGENT_LIBS} ${MESOS_TARGET})
+if (NOT WIN32)
+  add_executable(mesos-io-switchboard io/switchboard_main.cpp)
+  target_link_libraries(mesos-io-switchboard PRIVATE mesos)
 
-# ADD BINARY DEPENDENCIES (tells CMake what to compile/build first).
-####################################################################
-add_dependencies(${MESOS_CONTAINERIZER} ${MESOS_TARGET})
+  add_executable(
+    mesos-cni-port-mapper
+    isolators/network/cni/plugins/port_mapper/main.cpp
+    isolators/network/cni/plugins/port_mapper/port_mapper.cpp)
+
+  target_link_libraries(mesos-cni-port-mapper PRIVATE mesos)
+endif ()

@@ -33,6 +33,8 @@
 #include <process/protobuf.hpp>
 #include <process/timer.hpp>
 
+#include <process/ssl/flags.hpp>
+
 #include <stout/duration.hpp>
 #include <stout/lambda.hpp>
 #include <stout/nothing.hpp>
@@ -95,7 +97,8 @@ class ShutdownProcess : public process::Process<ShutdownProcess>
 {
 public:
   explicit ShutdownProcess(const Duration& _gracePeriod)
-    : gracePeriod(_gracePeriod) {}
+    : ProcessBase(generate("__shutdown_executor__")),
+      gracePeriod(_gracePeriod) {}
 
 protected:
   virtual void initialize()
@@ -176,7 +179,7 @@ public:
 
     // Initialize logging.
     if (flags.initialize_driver_logging) {
-      logging::initialize("mesos", flags);
+      logging::initialize("mesos", false, flags);
     } else {
       VLOG(1) << "Disabling initialization of GLOG logging";
     }
@@ -205,12 +208,25 @@ public:
     UPID upid(value.get());
     CHECK(upid) << "Failed to parse MESOS_SLAVE_PID '" << value.get() << "'";
 
+    string scheme = "http";
+
+#ifdef USE_SSL_SOCKET
+    if (process::network::openssl::flags().enabled) {
+      scheme = "https";
+    }
+#endif // USE_SSL_SOCKET
+
     agent = ::URL(
-        "http",
+        scheme,
         upid.address.ip,
         upid.address.port,
         upid.id +
         "/api/v1/executor");
+
+    value = os::getenv("MESOS_EXECUTOR_AUTHENTICATION_TOKEN");
+    if (value.isSome()) {
+      authenticationToken = value.get();
+    }
 
     // Get checkpointing status from environment.
     value = os::getenv("MESOS_CHECKPOINT");
@@ -298,6 +314,10 @@ public:
     request.headers = {{"Accept", stringify(contentType)},
                        {"Content-Type", stringify(contentType)}};
 
+    if (authenticationToken.isSome()) {
+      request.headers["Authorization"] = "Bearer " + authenticationToken.get();
+    }
+
     CHECK_SOME(connections);
 
     Future<Response> response;
@@ -333,14 +353,14 @@ protected:
   {
     CHECK(state == DISCONNECTED || state == CONNECTING) << state;
 
-    connectionId = UUID::random();
+    connectionId = id::UUID::random();
 
     state = CONNECTING;
 
     // This automatic variable is needed for lambda capture. We need to
     // create a copy here because `connectionId` might change by the time the
     // second `http::connect()` gets called.
-    UUID connectionId_ = connectionId.get();
+    id::UUID connectionId_ = connectionId.get();
 
     // We create two persistent connections here, one for subscribe
     // call/streaming response and another for non-subscribe calls/responses.
@@ -357,7 +377,7 @@ protected:
   }
 
   void connected(
-      const UUID& _connectionId,
+      const id::UUID& _connectionId,
       const Future<Connection>& connection1,
       const Future<Connection>& connection2)
   {
@@ -425,7 +445,7 @@ protected:
   }
 
   void disconnected(
-      const UUID& _connectionId,
+      const id::UUID& _connectionId,
       const string& failure)
   {
     // Ignore if the disconnection happened from an old stale connection.
@@ -560,7 +580,7 @@ protected:
   }
 
   void _send(
-      const UUID& _connectionId,
+      const id::UUID& _connectionId,
       const Call& call,
       const Future<Response>& response)
   {
@@ -673,8 +693,8 @@ protected:
 
     // This could happen if the agent failed over after sending an event.
     if (event->isNone()) {
-      const string error =  "End-Of-File received from agent. The agent closed "
-                            "the event stream";
+      const string error = "End-Of-File received from agent. The agent closed"
+                           " the event stream";
       LOG(ERROR) << error;
 
       disconnected(connectionId.get(), error);
@@ -785,7 +805,7 @@ private:
   // the agent (e.g., the agent process restarted while an attempt was in
   // progress). This helps us in uniquely identifying the current connection
   // instance and ignoring the stale instance.
-  Option<UUID> connectionId; // UUID to identify the connection instance.
+  Option<id::UUID> connectionId; // UUID to identify the connection instance.
 
   ContentType contentType;
   Callbacks callbacks;
@@ -800,6 +820,7 @@ private:
   Option<Duration> maxBackoff;
   Option<Timer> recoveryTimer;
   Duration shutdownGracePeriod;
+  Option<string> authenticationToken;
 };
 
 

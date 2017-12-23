@@ -41,6 +41,7 @@
 #include <stout/strings.hpp>
 #include <stout/path.hpp>
 
+#include <stout/os/constants.hpp>
 #include <stout/os/exists.hpp>
 #include <stout/os/killtree.hpp>
 #include <stout/os/stat.hpp>
@@ -107,6 +108,12 @@ PosixDiskIsolatorProcess::~PosixDiskIsolatorProcess() {}
 
 
 bool PosixDiskIsolatorProcess::supportsNesting()
+{
+  return true;
+}
+
+
+bool PosixDiskIsolatorProcess::supportsStandalone()
 {
   return true;
 }
@@ -260,6 +267,8 @@ Future<Nothing> PosixDiskIsolatorProcess::update(
   // Remove paths that we no longer interested in.
   foreach (const string& path, info->paths.keys()) {
     if (!quotas.contains(path)) {
+      // Cancel the usage collection as we are no longer interested.
+      info->paths[path].usage.discard();
       info->paths.erase(path);
     }
   }
@@ -277,6 +286,11 @@ Future<Bytes> PosixDiskIsolatorProcess::collect(
   const Owned<Info>& info = infos[containerId];
 
   // Volume paths to exclude from sandbox disk usage calculation.
+  //
+  // TODO(jieyu): The 'excludes' list might change when a new
+  // persistent volume is added to the list. That might result in the
+  // 'du' process to incorrectly include the disk usage of the newly
+  // added persistent volume to the usage of the sandbox.
   vector<string> excludes;
   if (path == info->directory) {
     foreachkey (const string& exclude, info->paths) {
@@ -380,22 +394,46 @@ Future<ResourceStatistics> PosixDiskIsolatorProcess::usage(
     return Failure("Unknown container");
   }
 
-  // TODO(hartem): Report volume usage  as well (MESOS-4263).
   ResourceStatistics result;
 
   const Owned<Info>& info = infos[containerId];
 
-  if (info->paths.contains(info->directory)) {
-    Option<Bytes> quota = info->paths[info->directory].quota.disk();
+  foreachpair (const string& path,
+               const Info::PathInfo& pathInfo,
+               info->paths) {
+    DiskStatistics *statistics = result.add_disk_statistics();
+
+    Option<Bytes> quota = pathInfo.quota.disk();
     CHECK_SOME(quota);
 
-    result.set_disk_limit_bytes(quota.get().bytes());
+    statistics->set_limit_bytes(quota->bytes());
+    if (path == info->directory) {
+      result.set_disk_limit_bytes(quota->bytes());
+    }
 
     // NOTE: There may be a large delay (# of containers * interval)
     // until an initial cached value is returned here!
-    if (info->paths[info->directory].lastUsage.isSome()) {
-      result.set_disk_used_bytes(
-          info->paths[info->directory].lastUsage.get().bytes());
+    if (pathInfo.lastUsage.isSome()) {
+      statistics->set_used_bytes(pathInfo.lastUsage->bytes());
+      if (path == info->directory) {
+        result.set_disk_used_bytes(pathInfo.lastUsage->bytes());
+      }
+    }
+
+    // Set meta information for persistent volumes.
+    if (path != info->directory) {
+      // TODO(jieyu): For persistent volumes, validate that there is
+      // only one Resource object associated with it.
+      Resource resource = *pathInfo.quota.begin();
+
+      if (resource.has_disk() && resource.disk().has_source()) {
+        statistics->mutable_source()->CopyFrom(resource.disk().source());
+      }
+
+      if (resource.has_disk() && resource.disk().has_persistence()) {
+        statistics->mutable_persistence()->CopyFrom(
+            resource.disk().persistence());
+      }
     }
   }
 
@@ -542,7 +580,7 @@ private:
     Try<Subprocess> s = subprocess(
         "du",
         command,
-        Subprocess::PATH("/dev/null"),
+        Subprocess::PATH(os::DEV_NULL),
         Subprocess::PIPE(),
         Subprocess::PIPE(),
         nullptr,
@@ -578,7 +616,7 @@ private:
     const Owned<Entry>& entry = entries.front();
     CHECK_SOME(entry->du);
 
-    Future<Option<int>> status = std::get<0>(future.get());
+    const Future<Option<int>>& status = std::get<0>(future.get());
 
     if (!status.isReady()) {
       entry->promise.fail(
@@ -587,7 +625,7 @@ private:
     } else if (status.get().isNone()) {
       entry->promise.fail("Failed to reap the status of 'du'");
     } else if (status.get().get() != 0) {
-      Future<string> error = std::get<2>(future.get());
+      const Future<string>& error = std::get<2>(future.get());
       if (!error.isReady()) {
         entry->promise.fail(
             "Failed to perform 'du'. Reading stderr failed: " +
@@ -596,7 +634,7 @@ private:
         entry->promise.fail("Failed to perform 'du': " + error.get());
       }
     } else {
-      Future<string> output = std::get<1>(future.get());
+      const Future<string>& output = std::get<1>(future.get());
       if (!output.isReady()) {
         entry->promise.fail(
             "Failed to read stdout from 'du': " +

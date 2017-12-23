@@ -58,11 +58,7 @@ UPID::UPID(const string& s)
 
 
 // TODO(benh): Make this inline-able (cyclic dependency issues).
-UPID::UPID(const ProcessBase& process)
-{
-  id = process.self().id;
-  address = process.self().address;
-}
+UPID::UPID(const ProcessBase& process) : UPID(process.self()) {}
 
 
 UPID::operator string() const
@@ -101,7 +97,7 @@ istream& operator>>(istream& stream, UPID& pid)
 
   string id;
   string host;
-  network::Address address;
+  network::inet::Address address = network::inet4::Address::ANY_ANY();
 
   size_t index = str.find('@');
 
@@ -141,10 +137,14 @@ istream& operator>>(istream& stream, UPID& pid)
     return stream;
   }
 
-  pid.id = id;
+  pid.id = std::move(id);
   pid.address = address;
+
+  pid.resolve();
 
   return stream;
 }
+
+const std::string UPID::ID::EMPTY = "";
 
 } // namespace process {

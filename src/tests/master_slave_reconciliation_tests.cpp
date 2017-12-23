@@ -122,7 +122,7 @@ TEST_F(MasterSlaveReconciliationTest, SlaveReregisterTerminatedExecutor)
   driver.start();
 
   AWAIT_READY(status);
-  EXPECT_EQ(TASK_RUNNING, status.get().state());
+  EXPECT_EQ(TASK_RUNNING, status->state());
 
   // Make sure the acknowledgement reaches the slave.
   AWAIT_READY(statusUpdateAcknowledgementMessage);
@@ -152,14 +152,14 @@ TEST_F(MasterSlaveReconciliationTest, SlaveReregisterTerminatedExecutor)
     .WillOnce(FutureArg<1>(&status2));
 
   // We drop the 'UpdateFrameworkMessage' from the master to slave to
-  // stop the status update manager from retrying the update that was
-  // already sent due to the new master detection.
+  // stop the task status update manager from retrying the update that
+  // was already sent due to the new master detection.
   DROP_PROTOBUFS(UpdateFrameworkMessage(), _, _);
 
   detector.appoint(master.get()->pid);
 
   AWAIT_READY(status2);
-  EXPECT_EQ(TASK_FINISHED, status2.get().state());
+  EXPECT_EQ(TASK_FINISHED, status2->state());
 
   driver.stop();
   driver.join();
@@ -194,7 +194,7 @@ TEST_F(MasterSlaveReconciliationTest, ReconcileLostTask)
 
   AWAIT_READY(offers);
 
-  EXPECT_NE(0u, offers.get().size());
+  ASSERT_FALSE(offers->empty());
 
   TaskInfo task;
   task.set_name("test task");
@@ -233,10 +233,10 @@ TEST_F(MasterSlaveReconciliationTest, ReconcileLostTask)
 
   AWAIT_READY(status);
 
-  EXPECT_EQ(task.task_id(), status.get().task_id());
-  EXPECT_EQ(TASK_LOST, status.get().state());
-  EXPECT_EQ(TaskStatus::SOURCE_SLAVE, status.get().source());
-  EXPECT_EQ(TaskStatus::REASON_RECONCILIATION, status.get().reason());
+  EXPECT_EQ(task.task_id(), status->task_id());
+  EXPECT_EQ(TASK_LOST, status->state());
+  EXPECT_EQ(TaskStatus::SOURCE_SLAVE, status->source());
+  EXPECT_EQ(TaskStatus::REASON_RECONCILIATION, status->reason());
 
   // Before we obtain the metrics, ensure that the master has finished
   // processing the status update so metrics have been updated.
@@ -289,7 +289,7 @@ TEST_F(MasterSlaveReconciliationTest, ReconcileDroppedTask)
 
   AWAIT_READY(offers);
 
-  EXPECT_NE(0u, offers.get().size());
+  ASSERT_FALSE(offers->empty());
 
   TaskInfo task;
   task.set_name("test task");
@@ -328,10 +328,10 @@ TEST_F(MasterSlaveReconciliationTest, ReconcileDroppedTask)
 
   AWAIT_READY(status);
 
-  EXPECT_EQ(task.task_id(), status.get().task_id());
-  EXPECT_EQ(TASK_DROPPED, status.get().state());
-  EXPECT_EQ(TaskStatus::SOURCE_SLAVE, status.get().source());
-  EXPECT_EQ(TaskStatus::REASON_RECONCILIATION, status.get().reason());
+  EXPECT_EQ(task.task_id(), status->task_id());
+  EXPECT_EQ(TASK_DROPPED, status->state());
+  EXPECT_EQ(TaskStatus::SOURCE_SLAVE, status->source());
+  EXPECT_EQ(TaskStatus::REASON_RECONCILIATION, status->reason());
 
   // Before we obtain the metrics, ensure that the master has finished
   // processing the status update so metrics have been updated.
@@ -411,7 +411,7 @@ TEST_F(MasterSlaveReconciliationTest, ReconcileRace)
   AWAIT_READY(reregisterSlaveMessage);
 
   AWAIT_READY(offers);
-  EXPECT_NE(0u, offers.get().size());
+  ASSERT_FALSE(offers->empty());
 
   TaskInfo task;
   task.set_name("test task");
@@ -474,7 +474,7 @@ TEST_F(MasterSlaveReconciliationTest, ReconcileRace)
   executorDriver->sendStatusUpdate(taskStatus);
 
   AWAIT_READY(status);
-  ASSERT_EQ(TASK_FINISHED, status.get().state());
+  ASSERT_EQ(TASK_FINISHED, status->state());
 
   EXPECT_CALL(exec, shutdown(_))
     .Times(AtMost(1));
@@ -511,7 +511,7 @@ TEST_F(MasterSlaveReconciliationTest, SlaveReregisterPendingTask)
   driver.start();
 
   AWAIT_READY(offers);
-  EXPECT_NE(0u, offers.get().size());
+  ASSERT_FALSE(offers->empty());
 
   // No TASK_LOST updates should occur!
   EXPECT_CALL(sched, statusUpdate(&driver, _))
@@ -580,7 +580,7 @@ TEST_F(MasterSlaveReconciliationTest, SlaveReregisterTerminalTask)
   driver.start();
 
   AWAIT_READY(offers);
-  EXPECT_NE(0u, offers.get().size());
+  ASSERT_FALSE(offers->empty());
 
   TaskInfo task;
   task.set_name("test task");
@@ -623,13 +623,13 @@ TEST_F(MasterSlaveReconciliationTest, SlaveReregisterTerminalTask)
   // re-registers. We check this by calling Clock::settle() so that
   // the only update the scheduler receives is the retried
   // TASK_FINISHED update.
-  // NOTE: The status update manager resends the status update when
-  // it detects a new master.
+  // NOTE: The task status update manager resends the status update
+  // when it detects a new master.
   Clock::pause();
   Clock::settle();
 
   AWAIT_READY(status);
-  ASSERT_EQ(TASK_FINISHED, status.get().state());
+  ASSERT_EQ(TASK_FINISHED, status->state());
 
   EXPECT_CALL(exec, shutdown(_))
     .Times(AtMost(1));
@@ -668,7 +668,7 @@ TEST_F(MasterSlaveReconciliationTest, SlaveReregisterFrameworks)
   driver.start();
 
   AWAIT_READY(offers);
-  EXPECT_NE(0u, offers.get().size());
+  ASSERT_FALSE(offers->empty());
 
   TaskInfo task;
   task.set_name("test task");
@@ -692,7 +692,7 @@ TEST_F(MasterSlaveReconciliationTest, SlaveReregisterFrameworks)
 
   // Wait until TASK_RUNNING of the task is received.
   AWAIT_READY(status);
-  EXPECT_EQ(TASK_RUNNING, status.get().state());
+  EXPECT_EQ(TASK_RUNNING, status->state());
 
   Future<ReregisterSlaveMessage> reregisterSlave =
     FUTURE_PROTOBUF(ReregisterSlaveMessage(), _, _);
@@ -705,10 +705,198 @@ TEST_F(MasterSlaveReconciliationTest, SlaveReregisterFrameworks)
   // active frameworks.
   AWAIT_READY(reregisterSlave);
 
-  EXPECT_EQ(1u, reregisterSlave.get().frameworks().size());
+  EXPECT_EQ(1u, reregisterSlave->frameworks().size());
 
   EXPECT_CALL(exec, shutdown(_))
     .Times(AtMost(1));
+
+  driver.stop();
+  driver.join();
+}
+
+
+// This test verifies that when re-registering, the slave sends the
+// executor ID of a non-command executor task, but not the one of a
+// command executor task. We then check that the master's API has
+// task IDs absent only for the command executor case.
+//
+// This was motivated by MESOS-8135.
+TEST_F(MasterSlaveReconciliationTest, SlaveReregisterTaskExecutorIds)
+{
+  Try<Owned<cluster::Master>> master = StartMaster();
+  ASSERT_SOME(master);
+
+  slave::Flags flags = CreateSlaveFlags();
+
+  StandaloneMasterDetector detector(master.get()->pid);
+  Try<Owned<cluster::Slave>> slave = StartSlave(&detector, flags);
+  ASSERT_SOME(slave);
+
+  MockScheduler sched;
+  MesosSchedulerDriver driver(
+      &sched, DEFAULT_FRAMEWORK_INFO, master.get()->pid, DEFAULT_CREDENTIAL);
+
+  Future<FrameworkID> frameworkId;
+  EXPECT_CALL(sched, registered(&driver, _, _))
+    .WillOnce(FutureArg<1>(&frameworkId));
+
+  Future<vector<Offer>> offers;
+  EXPECT_CALL(sched, resourceOffers(&driver, _))
+    .WillOnce(FutureArg<1>(&offers))
+    .WillRepeatedly(Return()); // Ignore subsequent offers.
+
+  driver.start();
+
+  AWAIT_READY(frameworkId);
+
+  AWAIT_READY(offers);
+  EXPECT_NE(0u, offers->size());
+
+  const Offer& offer = offers->front();
+  const SlaveID& slaveId = offer.slave_id();
+
+  Resources resources = Resources::parse(defaultTaskResourcesString).get();
+
+  TaskInfo commandExecutorTask =
+    createTask(slaveId, resources, SLEEP_COMMAND(1000));
+
+  TaskInfo defaultExecutorTask =
+    createTask(slaveId, resources, SLEEP_COMMAND(1000));
+
+  ExecutorInfo defaultExecutorInfo;
+  defaultExecutorInfo.set_type(ExecutorInfo::DEFAULT);
+  defaultExecutorInfo.mutable_executor_id()->CopyFrom(DEFAULT_EXECUTOR_ID);
+  defaultExecutorInfo.mutable_framework_id()->CopyFrom(frameworkId.get());
+  defaultExecutorInfo.mutable_resources()->CopyFrom(resources);
+
+  // We expect two TASK_STARTING and two TASK_RUNNING updates.
+  vector<Future<TaskStatus>> taskStatuses(4);
+
+  {
+    // This variable doesn't have to be used explicitly.
+    testing::InSequence inSequence;
+
+    foreach (Future<TaskStatus>& taskStatus, taskStatuses) {
+      EXPECT_CALL(sched, statusUpdate(&driver, _))
+        .WillOnce(FutureArg<1>(&taskStatus));
+    }
+
+    EXPECT_CALL(sched, statusUpdate(&driver, _))
+      .WillRepeatedly(Return()); // Ignore subsequent updates.
+  }
+
+  driver.acceptOffers(
+      {offer.id()},
+      {LAUNCH({commandExecutorTask}),
+       LAUNCH_GROUP(
+           defaultExecutorInfo, createTaskGroupInfo({defaultExecutorTask}))});
+
+  // We track the status updates of each task separately, to verify
+  // that they transition from TASK_RUNNING to TASK_FINISHED.
+  hashmap<TaskID, TaskState> taskStates;
+  taskStates[commandExecutorTask.task_id()] = TASK_STAGING;
+  taskStates[defaultExecutorTask.task_id()] = TASK_STAGING;
+
+  foreach (const Future<TaskStatus>& taskStatus, taskStatuses) {
+    AWAIT_READY(taskStatus);
+
+    Option<TaskState> taskState = taskStates.get(taskStatus->task_id());
+    ASSERT_SOME(taskState);
+
+    switch (taskState.get()) {
+      case TASK_STAGING: {
+        ASSERT_EQ(TASK_STARTING, taskStatus->state())
+          << taskStatus->DebugString();
+
+        taskStates[taskStatus->task_id()] = TASK_STARTING;
+        break;
+      }
+      case TASK_STARTING: {
+        ASSERT_EQ(TASK_RUNNING, taskStatus->state())
+          << taskStatus->DebugString();
+
+        taskStates[taskStatus->task_id()] = TASK_RUNNING;
+        break;
+      }
+      default: {
+        FAIL() << "Unexpected task update: " << taskStatus->DebugString();
+        break;
+      }
+    }
+  }
+
+  Future<SlaveReregisteredMessage> slaveReregisteredMessage =
+    FUTURE_PROTOBUF(SlaveReregisteredMessage(), _, _);
+
+  Future<ReregisterSlaveMessage> reregisterSlaveMessage =
+    FUTURE_PROTOBUF(ReregisterSlaveMessage(), _, _);
+
+  // Simulate a spurious master change event (e.g., due to ZooKeeper
+  // expiration) at the slave to force re-registration.
+  detector.appoint(master.get()->pid);
+
+  // Expect to receive the 'ReregisterSlaveMessage' containing the
+  // active frameworks.
+  AWAIT_READY(reregisterSlaveMessage);
+
+  // Both tasks should be present; the command executor task shouldn't have an
+  // executor ID, but the default executor task should have one.
+  EXPECT_EQ(2u, reregisterSlaveMessage->tasks().size());
+  foreach (const Task& task, reregisterSlaveMessage->tasks()) {
+    if (task.task_id() == commandExecutorTask.task_id()) {
+      EXPECT_FALSE(task.has_executor_id())
+        << "The command executor ID is present, but it"
+        << " shouldn't be sent to the master";
+    } else {
+      EXPECT_TRUE(task.has_executor_id())
+        << "The default executor ID is missing";
+    }
+  }
+
+  AWAIT_READY(slaveReregisteredMessage);
+
+  // Check the response of the master state endpoint.
+  Future<process::http::Response> response = process::http::get(
+      master.get()->pid,
+      "state",
+      None(),
+      createBasicAuthHeaders(DEFAULT_CREDENTIAL));
+
+  AWAIT_EXPECT_RESPONSE_STATUS_EQ(process::http::OK().status, response);
+  AWAIT_EXPECT_RESPONSE_HEADER_EQ(APPLICATION_JSON, "Content-Type", response);
+
+  Try<JSON::Object> parse = JSON::parse<JSON::Object>(response->body);
+  ASSERT_SOME(parse);
+
+  Result<JSON::Array> tasks = parse->find<JSON::Array>("frameworks[0].tasks");
+  ASSERT_SOME(tasks);
+  ASSERT_EQ(2u, tasks->values.size());
+
+  ASSERT_SOME(parse->find<JSON::String>("frameworks[0].tasks[0].id"));
+
+  // Since tasks are stored in a hashmap, there is no strict guarantee of
+  // their ordering when listed.
+  std::string commandExecutorTaskExecutorId;
+  std::string defaultExecutorTaskExecutorId;
+  if (parse->find<JSON::String>("frameworks[0].tasks[0].id")->value ==
+      commandExecutorTask.task_id().value()) {
+    commandExecutorTaskExecutorId =
+      parse->find<JSON::String>("frameworks[0].tasks[0].executor_id")->value;
+    defaultExecutorTaskExecutorId =
+      parse->find<JSON::String>("frameworks[0].tasks[1].executor_id")->value;
+  } else {
+    defaultExecutorTaskExecutorId =
+      parse->find<JSON::String>("frameworks[0].tasks[0].executor_id")->value;
+    commandExecutorTaskExecutorId =
+      parse->find<JSON::String>("frameworks[0].tasks[1].executor_id")->value;
+  }
+
+  // The executor ID of the default executor task should be correct.
+  EXPECT_EQ(defaultExecutorInfo.executor_id().value(),
+            defaultExecutorTaskExecutorId);
+
+  // The executor ID of the command executor task should be empty.
+  EXPECT_EQ("", commandExecutorTaskExecutorId);
 
   driver.stop();
   driver.join();

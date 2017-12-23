@@ -84,11 +84,11 @@ NOTE: Only one of `--modules` or `--modules_dir` flag can be used at time.
               "name": "foo",
               "modules": [
                 {
-                  "name": "org_apache_mesos_bar"
+                  "name": "org_apache_mesos_bar",
                   "parameters": [
                     {
                       "key": "X",
-                      "value": "Y",
+                      "value": "Y"
                     }
                   ]
                 },
@@ -222,6 +222,12 @@ Isolator modules enable experimenting with specialized isolation and monitoring
 capabilities. Examples of these could be 3rdparty resource isolation mechanisms
 for GPGPU hardware, networking, etc.
 
+If a custom isolator module needs to checkpoint state to disk, it should do this
+on its own; Mesos does not provide public helpers to checkpoint module state.
+The standard location for such stored state is:
+
+    <runtime_dir>/isolators/<name_of_isolator>/
+
 ### Master Contender and Detector
 
 Contender and Detector modules enable developers to implement custom leader
@@ -313,8 +319,8 @@ mesos::modules::Module<TestModule> org_apache_mesos_TestModule(
 ### Testing a module
 
 Apart from testing the module by hand with explicit use of --modules flag, one
-can run the entire mesos test suite with the given module. For example, the
-following command will run the mesos test suite with the
+can run the entire Mesos test suite with the given module. For example, the
+following command will run the Mesos test suite with the
 `org_apache_mesos_TestCpuIsolator` module selected for isolation:
 
     ./bin/mesos-tests.sh --modules="/home/kapil/mesos/isolator-module/modules.json" --isolation="org_apache_mesos_TestCpuIsolator"

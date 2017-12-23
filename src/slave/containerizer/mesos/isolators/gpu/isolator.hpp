@@ -18,6 +18,7 @@
 #define __NVIDIA_GPU_ISOLATOR_HPP__
 
 #include <list>
+#include <map>
 #include <set>
 
 #include <process/future.hpp>
@@ -84,6 +85,7 @@ public:
       const NvidiaComponents& components);
 
   virtual bool supportsNesting();
+  virtual bool supportsStandalone();
 
   virtual process::Future<Nothing> recover(
       const std::list<mesos::slave::ContainerState>& states,
@@ -109,7 +111,7 @@ private:
       const std::string& hierarchy,
       const NvidiaGpuAllocator& _allocator,
       const NvidiaVolume& _volume,
-      const map<Path, cgroups::devices::Entry>& _controlDeviceEntries);
+      const std::map<Path, cgroups::devices::Entry>& _controlDeviceEntries);
 
   virtual process::Future<Option<mesos::slave::ContainerLaunchInfo>> _prepare(
       const mesos::slave::ContainerConfig& containerConfig);
@@ -139,7 +141,7 @@ private:
   NvidiaGpuAllocator allocator;
   NvidiaVolume volume;
 
-  const map<Path, cgroups::devices::Entry> controlDeviceEntries;
+  const std::map<Path, cgroups::devices::Entry> controlDeviceEntries;
 };
 
 } // namespace slave {

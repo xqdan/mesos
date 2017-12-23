@@ -10,15 +10,70 @@
 // See the License for the specific language governing permissions and
 // limitations under the License
 
+#include <memory>
+#include <string>
+#include <vector>
+
 #include <glog/logging.h>
 
 #include <gmock/gmock.h>
 
 #include <gtest/gtest.h>
 
+#include <stout/check.hpp>
 #include <stout/exit.hpp>
+#include <stout/fs.hpp>
 
+#include <stout/os/mkdtemp.hpp>
 #include <stout/os/socket.hpp> // For `wsa_*` on Windows.
+#include <stout/os/touch.hpp>
+
+#include <stout/tests/environment.hpp>
+
+using stout::internal::tests::Environment;
+using stout::internal::tests::TestFilter;
+
+using std::make_shared;
+using std::shared_ptr;
+using std::string;
+using std::vector;
+
+
+// Attempt to create a symlink. If creating a symlink fails, disable
+// all unit tests that rely on the creation of symlinks.
+class SymlinkFilter : public TestFilter
+{
+public:
+  SymlinkFilter()
+  {
+    const Try<string> temp_path = os::mkdtemp();
+    CHECK_SOME(temp_path);
+
+    const string file = path::join(temp_path.get(), "file");
+    const string link = path::join(temp_path.get(), "link");
+
+    CHECK_SOME(os::touch(file));
+
+    Try<Nothing> symlink_check = fs::symlink(file, link);
+    can_create_symlinks = !symlink_check.isError();
+
+    if (!can_create_symlinks) {
+      std::cerr
+        << "-------------------------------------------------------------\n"
+        << "Unable to create symlinks, so no symlink tests will be run\n"
+        << "-------------------------------------------------------------"
+        << std::endl;
+    }
+  }
+
+  bool disable(const ::testing::TestInfo* test) const
+  {
+    return matches(test, "SYMLINK_") && !can_create_symlinks;
+  }
+
+private:
+  bool can_create_symlinks;
+};
 
 
 #ifdef __WINDOWS__
@@ -60,6 +115,10 @@ int main(int argc, char** argv)
   // paramaters to these functions, we disable this for testing.
   _set_invalid_parameter_handler(noop_invalid_parameter_handler);
 #endif // __WINDOWS__
+
+  vector<shared_ptr<TestFilter>> filters = {make_shared<SymlinkFilter>()};
+  Environment* environment = new Environment(filters);
+  testing::AddGlobalTestEnvironment(environment);
 
   const int test_results = RUN_ALL_TESTS();
 

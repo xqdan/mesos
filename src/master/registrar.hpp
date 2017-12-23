@@ -19,7 +19,7 @@
 
 #include <mesos/mesos.hpp>
 
-#include <mesos/state/protobuf.hpp>
+#include <mesos/state/state.hpp>
 
 #include <process/future.hpp>
 #include <process/owned.hpp>
@@ -39,14 +39,14 @@ class RegistrarProcess;
 
 // Defines an abstraction for operations that can be applied on the
 // Registry.
-// TODO(xujyan): Make Operation generic so that we can apply them
-// against a generic "batch operation applier" abstraction, see TODO
-// below for more details.
-class Operation : public process::Promise<bool>
+// TODO(xujyan): Make RegistryOperation generic so that we can apply
+// them against a generic "batch operation applier" abstraction, see
+// the TODO below for more details.
+class RegistryOperation : public process::Promise<bool>
 {
 public:
-  Operation() : success(false) {}
-  virtual ~Operation() {}
+  RegistryOperation() : success(false) {}
+  virtual ~RegistryOperation() {}
 
   // Attempts to invoke the operation on the registry object.
   // Aided by accumulator(s):
@@ -92,7 +92,7 @@ class Registrar
 {
 public:
   Registrar(const Flags& flags,
-            mesos::state::protobuf::State* state,
+            mesos::state::State* state,
             const Option<std::string>& authenticationRealm = None());
   virtual ~Registrar();
 
@@ -111,7 +111,8 @@ public:
   //   false if the operation is not permitted.
   //   Failure if the operation fails (possibly lost log leadership),
   //     or recovery failed.
-  virtual process::Future<bool> apply(process::Owned<Operation> operation);
+  virtual process::Future<bool> apply(
+      process::Owned<RegistryOperation> operation);
 
   // Gets the pid of the underlying process.
   // Used in tests.

@@ -58,20 +58,34 @@ Deferred<void()> defer(const Process<T>* process, void (T::*method)())
 // libc++) we can't use std::bind with a std::function so we have to
 // explicitly use the std::function<R(P...)>::operator() (see
 // http://stackoverflow.com/questions/20097616/stdbind-to-a-stdfunction-crashes-with-clang).
+
+// This assumes that type and variable base names are `A` and `a` respectively.
+#define FORWARD_A(Z, N, DATA) std::forward<A ## N>(a ## N)
+
+// This assumes that type and variable base names are `P` and `p` respectively.
+#define FORWARD_P(Z, N, DATA) std::forward<P ## N>(p ## N)
+
 #define TEMPLATE(Z, N, DATA)                                            \
   template <typename T,                                                 \
             ENUM_PARAMS(N, typename P),                                 \
             ENUM_PARAMS(N, typename A)>                                 \
   auto defer(const PID<T>& pid,                                         \
              void (T::*method)(ENUM_PARAMS(N, P)),                      \
-             ENUM_BINARY_PARAMS(N, A, a))                               \
-    -> _Deferred<decltype(std::bind(&std::function<void(ENUM_PARAMS(N, P))>::operator(), std::function<void(ENUM_PARAMS(N, P))>(), ENUM_PARAMS(N, a)))> /* NOLINT(whitespace/line_length) */ \
+             ENUM_BINARY_PARAMS(N, A, &&a))                             \
+    -> _Deferred<decltype(                                              \
+         lambda::partial(                                               \
+           &std::function<void(ENUM_PARAMS(N, P))>::operator(),         \
+           std::function<void(ENUM_PARAMS(N, P))>(),                    \
+           ENUM(N, FORWARD_A, _)))>                                     \
   {                                                                     \
     std::function<void(ENUM_PARAMS(N, P))> f(                           \
-        [=](ENUM_BINARY_PARAMS(N, P, p)) {                              \
-          dispatch(pid, method, ENUM_PARAMS(N, p));                     \
+        [=](ENUM_BINARY_PARAMS(N, P, &&p)) {                            \
+          dispatch(pid, method, ENUM(N, FORWARD_P, _));                 \
         });                                                             \
-    return std::bind(&std::function<void(ENUM_PARAMS(N, P))>::operator(), std::move(f), ENUM_PARAMS(N, a)); /* NOLINT(whitespace/line_length) */ \
+    return lambda::partial(                                             \
+        &std::function<void(ENUM_PARAMS(N, P))>::operator(),            \
+        std::move(f),                                                   \
+        ENUM(N, FORWARD_A, _));                                         \
   }                                                                     \
                                                                         \
   template <typename T,                                                 \
@@ -79,10 +93,10 @@ Deferred<void()> defer(const Process<T>* process, void (T::*method)())
             ENUM_PARAMS(N, typename A)>                                 \
   auto defer(const Process<T>& process,                                 \
              void (T::*method)(ENUM_PARAMS(N, P)),                      \
-             ENUM_BINARY_PARAMS(N, A, a))                               \
-    -> decltype(defer(process.self(), method, ENUM_PARAMS(N, a)))       \
+             ENUM_BINARY_PARAMS(N, A, &&a))                             \
+    -> decltype(defer(process.self(), method, ENUM(N, FORWARD_A, _)))   \
   {                                                                     \
-    return defer(process.self(), method, ENUM_PARAMS(N, a));            \
+    return defer(process.self(), method, ENUM(N, FORWARD_A, _));        \
   }                                                                     \
                                                                         \
   template <typename T,                                                 \
@@ -90,13 +104,13 @@ Deferred<void()> defer(const Process<T>* process, void (T::*method)())
             ENUM_PARAMS(N, typename A)>                                 \
   auto defer(const Process<T>* process,                                 \
              void (T::*method)(ENUM_PARAMS(N, P)),                      \
-             ENUM_BINARY_PARAMS(N, A, a))                               \
-    -> decltype(defer(process->self(), method, ENUM_PARAMS(N, a)))      \
+             ENUM_BINARY_PARAMS(N, A, &&a))                             \
+    -> decltype(defer(process->self(), method, ENUM(N, FORWARD_A, _)))  \
   {                                                                     \
-    return defer(process->self(), method, ENUM_PARAMS(N, a));           \
+    return defer(process->self(), method, ENUM(N, FORWARD_A, _));       \
   }
 
-  REPEAT_FROM_TO(1, 11, TEMPLATE, _) // Args A0 -> A9.
+  REPEAT_FROM_TO(1, 13, TEMPLATE, _) // Args A0 -> A11.
 #undef TEMPLATE
 
 
@@ -127,14 +141,21 @@ Deferred<Future<R>()> defer(const Process<T>* process, Future<R> (T::*method)())
             ENUM_PARAMS(N, typename A)>                                 \
   auto defer(const PID<T>& pid,                                         \
              Future<R> (T::*method)(ENUM_PARAMS(N, P)),                 \
-             ENUM_BINARY_PARAMS(N, A, a))                               \
-    -> _Deferred<decltype(std::bind(&std::function<Future<R>(ENUM_PARAMS(N, P))>::operator(), std::function<Future<R>(ENUM_PARAMS(N, P))>(), ENUM_PARAMS(N, a)))> /* NOLINT(whitespace/line_length) */ \
+             ENUM_BINARY_PARAMS(N, A, &&a))                             \
+    -> _Deferred<decltype(                                              \
+         lambda::partial(                                               \
+           &std::function<Future<R>(ENUM_PARAMS(N, P))>::operator(),    \
+           std::function<Future<R>(ENUM_PARAMS(N, P))>(),               \
+           ENUM(N, FORWARD_A, _)))>                                     \
   {                                                                     \
     std::function<Future<R>(ENUM_PARAMS(N, P))> f(                      \
-        [=](ENUM_BINARY_PARAMS(N, P, p)) {                              \
-          return dispatch(pid, method, ENUM_PARAMS(N, p));              \
+        [=](ENUM_BINARY_PARAMS(N, P, &&p)) {                            \
+          return dispatch(pid, method, ENUM(N, FORWARD_P, _));          \
         });                                                             \
-    return std::bind(&std::function<Future<R>(ENUM_PARAMS(N, P))>::operator(), std::move(f), ENUM_PARAMS(N, a)); /* NOLINT(whitespace/line_length) */ \
+    return lambda::partial(                                             \
+        &std::function<Future<R>(ENUM_PARAMS(N, P))>::operator(),       \
+        std::move(f),                                                   \
+        ENUM(N, FORWARD_A, _));                                         \
   }                                                                     \
                                                                         \
   template <typename R,                                                 \
@@ -143,10 +164,10 @@ Deferred<Future<R>()> defer(const Process<T>* process, Future<R> (T::*method)())
             ENUM_PARAMS(N, typename A)>                                 \
   auto defer(const Process<T>& process,                                 \
              Future<R> (T::*method)(ENUM_PARAMS(N, P)),                 \
-             ENUM_BINARY_PARAMS(N, A, a))                               \
-    -> decltype(defer(process.self(), method, ENUM_PARAMS(N, a)))       \
+             ENUM_BINARY_PARAMS(N, A, &&a))                             \
+    -> decltype(defer(process.self(), method, ENUM(N, FORWARD_A, _)))   \
   {                                                                     \
-    return defer(process.self(), method, ENUM_PARAMS(N, a));            \
+    return defer(process.self(), method, ENUM(N, FORWARD_A, _));        \
   }                                                                     \
                                                                         \
   template <typename R,                                                 \
@@ -155,13 +176,13 @@ Deferred<Future<R>()> defer(const Process<T>* process, Future<R> (T::*method)())
             ENUM_PARAMS(N, typename A)>                                 \
   auto defer(const Process<T>* process,                                 \
              Future<R> (T::*method)(ENUM_PARAMS(N, P)),                 \
-             ENUM_BINARY_PARAMS(N, A, a))                               \
-    -> decltype(defer(process->self(), method, ENUM_PARAMS(N, a)))      \
+             ENUM_BINARY_PARAMS(N, A, &&a))                             \
+    -> decltype(defer(process->self(), method, ENUM(N, FORWARD_A, _)))  \
   {                                                                     \
-    return defer(process->self(), method, ENUM_PARAMS(N, a));           \
+    return defer(process->self(), method, ENUM(N, FORWARD_A, _));       \
   }
 
-  REPEAT_FROM_TO(1, 11, TEMPLATE, _) // Args A0 -> A9.
+  REPEAT_FROM_TO(1, 13, TEMPLATE, _) // Args A0 -> A11.
 #undef TEMPLATE
 
 
@@ -192,14 +213,21 @@ Deferred<Future<R>()> defer(const Process<T>* process, R (T::*method)())
             ENUM_PARAMS(N, typename A)>                                 \
   auto defer(const PID<T>& pid,                                         \
              R (T::*method)(ENUM_PARAMS(N, P)),                         \
-             ENUM_BINARY_PARAMS(N, A, a))                               \
-    -> _Deferred<decltype(std::bind(&std::function<Future<R>(ENUM_PARAMS(N, P))>::operator(), std::function<Future<R>(ENUM_PARAMS(N, P))>(), ENUM_PARAMS(N, a)))> /* NOLINT(whitespace/line_length) */ \
+             ENUM_BINARY_PARAMS(N, A, &&a))                             \
+    -> _Deferred<decltype(                                              \
+         lambda::partial(                                               \
+           &std::function<Future<R>(ENUM_PARAMS(N, P))>::operator(),    \
+           std::function<Future<R>(ENUM_PARAMS(N, P))>(),               \
+           ENUM(N, FORWARD_A, _)))>                                     \
   {                                                                     \
     std::function<Future<R>(ENUM_PARAMS(N, P))> f(                      \
-        [=](ENUM_BINARY_PARAMS(N, P, p)) {                              \
-          return dispatch(pid, method, ENUM_PARAMS(N, p));              \
+        [=](ENUM_BINARY_PARAMS(N, P, &&p)) {                            \
+          return dispatch(pid, method, ENUM(N, FORWARD_P, _));          \
         });                                                             \
-    return std::bind(&std::function<Future<R>(ENUM_PARAMS(N, P))>::operator(), std::move(f), ENUM_PARAMS(N, a)); /* NOLINT(whitespace/line_length) */ \
+    return lambda::partial(                                             \
+        &std::function<Future<R>(ENUM_PARAMS(N, P))>::operator(),       \
+        std::move(f),                                                   \
+        ENUM(N, FORWARD_A, _));                                         \
   }                                                                     \
                                                                         \
   template <typename R,                                                 \
@@ -209,10 +237,10 @@ Deferred<Future<R>()> defer(const Process<T>* process, R (T::*method)())
   auto                                                                  \
   defer(const Process<T>& process,                                      \
         R (T::*method)(ENUM_PARAMS(N, P)),                              \
-        ENUM_BINARY_PARAMS(N, A, a))                                    \
-    -> decltype(defer(process.self(), method, ENUM_PARAMS(N, a)))       \
+        ENUM_BINARY_PARAMS(N, A, &&a))                                  \
+    -> decltype(defer(process.self(), method, ENUM(N, FORWARD_A, _)))   \
   {                                                                     \
-    return defer(process.self(), method, ENUM_PARAMS(N, a));            \
+    return defer(process.self(), method, ENUM(N, FORWARD_A, _));        \
   }                                                                     \
                                                                         \
   template <typename R,                                                 \
@@ -222,14 +250,17 @@ Deferred<Future<R>()> defer(const Process<T>* process, R (T::*method)())
   auto                                                                  \
   defer(const Process<T>* process,                                      \
         R (T::*method)(ENUM_PARAMS(N, P)),                              \
-        ENUM_BINARY_PARAMS(N, A, a))                                    \
-    -> decltype(defer(process->self(), method, ENUM_PARAMS(N, a)))      \
+        ENUM_BINARY_PARAMS(N, A, &&a))                                  \
+    -> decltype(defer(process->self(), method, ENUM(N, FORWARD_A, _)))  \
   {                                                                     \
-    return defer(process->self(), method, ENUM_PARAMS(N, a));           \
+    return defer(process->self(), method, ENUM(N, FORWARD_A, _));       \
   }
 
-  REPEAT_FROM_TO(1, 11, TEMPLATE, _) // Args A0 -> A9.
+  REPEAT_FROM_TO(1, 13, TEMPLATE, _) // Args A0 -> A11.
 #undef TEMPLATE
+
+#undef FORWARD_A
+#undef FORWARD_P
 
 
 // Now we define defer calls for functors (with and without a PID):

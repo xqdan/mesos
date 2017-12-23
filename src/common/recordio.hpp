@@ -26,10 +26,13 @@
 #include <process/defer.hpp>
 #include <process/dispatch.hpp>
 #include <process/http.hpp>
+#include <process/loop.hpp>
 #include <process/owned.hpp>
+#include <process/pid.hpp>
 #include <process/process.hpp>
 
 #include <stout/lambda.hpp>
+#include <stout/nothing.hpp>
 #include <stout/recordio.hpp>
 #include <stout/result.hpp>
 
@@ -59,17 +62,23 @@ template <typename T>
 class Reader
 {
 public:
+  // We spawn `ReaderProcess` as a managed process to guarantee
+  // that it does not wait on itself (this would cause a deadlock!).
+  // See comments in `Connection::Data` for further details.
   Reader(::recordio::Decoder<T>&& decoder,
          process::http::Pipe::Reader reader)
-    : process(new internal::ReaderProcess<T>(std::move(decoder), reader))
-  {
-    process::spawn(process.get());
-  }
+    : process(process::spawn(
+        new internal::ReaderProcess<T>(std::move(decoder), reader),
+        true)) {}
 
   virtual ~Reader()
   {
-    process::terminate(process.get());
-    process::wait(process.get());
+    // Note that we pass 'false' here to avoid injecting the
+    // termination event at the front of the queue. This is
+    // to ensure we don't drop any queued request dispatches
+    // which would leave the caller with a future stuck in
+    // a pending state.
+    process::terminate(process, false);
   }
 
   /**
@@ -80,12 +89,57 @@ public:
    */
   process::Future<Result<T>> read()
   {
-    return process::dispatch(process.get(), &internal::ReaderProcess<T>::read);
+    return process::dispatch(process, &internal::ReaderProcess<T>::read);
   }
 
 private:
-  process::Owned<internal::ReaderProcess<T>> process;
+  process::PID<internal::ReaderProcess<T>> process;
 };
+
+
+/**
+ * This is a helper function that reads records from a `Reader`, applies
+ * a transformation to the records and writes to the pipe.
+ *
+ * Returns a failed future if there are any errors reading or writing.
+ * The future is satisfied when we get a EOF.
+ *
+ * TODO(vinod): Split this method into primitives that can transform a
+ * stream of bytes to a stream of typed records that can be further transformed.
+ * See the TODO above in `Reader` for further details.
+ */
+template <typename T>
+process::Future<Nothing> transform(
+    process::Owned<Reader<T>>&& reader,
+    const std::function<std::string(const T&)>& func,
+    process::http::Pipe::Writer writer)
+{
+  return process::loop(
+      None(),
+      [=]() {
+        return reader->read();
+      },
+      [=](const Result<T>& record) mutable
+        -> process::Future<process::ControlFlow<Nothing>> {
+        // This could happen if EOF is sent by the writer.
+        if (record.isNone()) {
+          return process::Break();
+        }
+
+        // This could happen if there is a de-serialization error.
+        if (record.isError()) {
+          return process::Failure(record.error());
+        }
+
+        // TODO(vinod): Instead of detecting that the reader went away only
+        // after attempting a write, leverage `writer.readerClosed` future.
+        if (!writer.write(func(record.get()))) {
+          return process::Failure("Write failed to the pipe");
+        }
+
+        return process::Continue();
+      });
+}
 
 
 namespace internal {
@@ -97,7 +151,8 @@ public:
   ReaderProcess(
       ::recordio::Decoder<T>&& _decoder,
       process::http::Pipe::Reader _reader)
-    : decoder(_decoder),
+    : process::ProcessBase(process::ID::generate("__reader__")),
+      decoder(_decoder),
       reader(_reader),
       done(false) {}
 
@@ -157,6 +212,8 @@ private:
       waiters.pop();
     }
   }
+
+  using process::Process<ReaderProcess<T>>::consume;
 
   void consume()
   {

@@ -14,14 +14,17 @@ This guide describes the process of doing an official release of Mesos.
 
 2. Add your GPG public key to the Apache Mesos dist repository in the KEYS file.
 
-   * Fetch the svn repository:<br>
-     `svn co https://dist.apache.org/repos/dist/release/mesos`
+   * Fetch the svn repository:
 
-   * Append your public key using one of methods described in KEYS, e.g.:<br>
-     `(gpg --list-sigs <your name> && gpg --armor --export <your name>) >> KEYS`.
+          $ svn co https://dist.apache.org/repos/dist/release/mesos
 
-   * Push the commit:<br>
-     `svn ci`
+   * Append your public key using one of methods described in KEYS, e.g.:
+
+          $ (gpg --list-sigs <your name> && gpg --armor --export <your name>) >> KEYS
+
+   * Push the commit:
+
+          $ svn ci
 
 3. Submit your GPG public key to a keyserver, e.g.,
    [MIT PGP Public Key Server](https://pgp.mit.edu).
@@ -51,7 +54,9 @@ This guide describes the process of doing an official release of Mesos.
           </servers>
         </settings>
 
-6. Use `gpg-agent` to avoid typing your passphrase repeatedly.
+6. Use `gpg-agent` to avoid typing your passphrase repeatedly:
+
+        $ export GPG_TTY="$(tty)" && eval $(gpg-agent --daemon)
 
 
 ## Preparation
@@ -111,7 +116,8 @@ This guide describes the process of doing an official release of Mesos.
    pick onto the release branch.
 
 4. Ensure version in `configure.ac` and `CMakeLists.txt` is correctly set for
-   the release.
+   the release. Do not forget to remove "(WIP)" suffix from the release notes'
+   title.
 
 5. Run `make && support/generate-endpoint-help.py` and commit any resulting
    changes.
@@ -135,7 +141,7 @@ This guide describes the process of doing an official release of Mesos.
    identified.
 
 
-## Tagging the Release Candidate
+## Tagging and Voting the Release Candidate
 
 1. Ensure that you can build and pass all the tests.
 
@@ -148,26 +154,31 @@ This guide describes the process of doing an official release of Mesos.
 
 3. First tag the required SHA locally.
 
-        $ git tag <X.Y.Z-rcR>
+        $ git tag -a <X.Y.Z-rcR> -m "Tagging Mesos <X.Y.X-rcR>."
 
    **NOTE:** `X.Y.Z` is based on [semantic versioning](http://semver.org/)
    scheme. `R` is release candidate version that starts with 1.
 
 4. Tag the release externally and deploy the corresponding JAR to the
    [Apache maven repository](https://repository.apache.org). It is recommended
-   to use the `support/tag.sh` script to accomplish this.
+   to use the `support/vote.sh` script to accomplish this.
 
-        $ ./support/tag.sh X.Y.Z R
+        $ ./support/vote.sh X.Y.Z R
 
    **NOTE:** This script assumes that you have the requisite permissions to
    deploy the JAR. For instructions on how to set it up, please refer to
    `src/java/MESOS-MAVEN-README`.
 
-   **NOTE:** gnu-sed (Linux) requires `-i''` instead of the `-i ''`
-   (space-separated) that default OSX uses. You may need to modify your local
-   copy of `tag.sh` for it to complete successfully.
+5. The script also spits out an email template that you could use to
+   send the vote email.
 
-5. If this is a regular release, create a new release branch (<major>.<minor>.x)
+   **NOTE:** The `date -v+3d` command does not work on some platforms (e.g.
+   Ubuntu), so you may need to fill in the vote end date manually. The vote
+   should last for 3 business days instead of 3 calendar days anyway. Sometimes
+   we allow a longer vote, to allow more time for integration testing.
+
+
+6. If this is a regular release, create a new release branch (<major>.<minor>.x)
    from this tag.
 
         $ git checkout -b X.Y.x
@@ -176,26 +187,6 @@ This guide describes the process of doing an official release of Mesos.
    change `AC_INIT([mesos], [X.Y.Z]))`, as well as in `CMakeLists.txt`:
    change `set(MESOS_MAJOR_VERSION X)`, `set(MESOS_MINOR_VERSION Y)`,
    `set(MESOS_PATCH_VERSION Z)` and then commit.
-
-
-## Voting the Release Candidate
-
-1. Once a release candidate is deemed worthy to be officially released you
-   should call a vote on the `dev@mesos.apache.org` (and optionally
-   `user@mesos.apache.org`) mailing list.
-
-2. It is recommended to use the `support/vote.sh` script to vote the release
-   candidate.
-
-        $ ./support/vote.sh X.Y.Z R
-
-3. The release script also spits out an email template that you could use to
-   send the vote email.
-
-   **NOTE:** The `date -v+3d` command does not work on some platforms (e.g.
-   Ubuntu), so you may need to fill in the vote end date manually. The vote
-   should last for 3 business days instead of 3 calendar days anyway. Sometimes
-   we allow a longer vote, to allow more time for integration testing.
 
 
 ## Preparing a New Release Candidate
@@ -242,8 +233,7 @@ This guide describes the process of doing an official release of Mesos.
    in `site/data/releases.yml`. It is used to generate the release information
    on the website.
 
-2. Update the [Getting Started](getting-started.md) guide to use the latest
-   release link.
+2. Update the [Building](building.md) guide to use the latest release link.
 
 3. Check out the website from svn.
 
@@ -256,6 +246,12 @@ This guide describes the process of doing an official release of Mesos.
 
 4. Write a blog post announcing the new release and its features and major bug
    fixes. Include a link to the updated website.
+
+   * This command may be helpful to gather the list of all contributors between
+     two tags:
+     `git log --pretty=format:%an <tagX>..<tagY> | sort | uniq | awk '{print}' ORS=', '`
+
+   * Mention the blog post in `site/data/releases.yml`.
 
 
 ## Removing Old Releases from svn

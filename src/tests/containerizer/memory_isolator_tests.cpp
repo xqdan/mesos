@@ -51,10 +51,14 @@ class MemoryIsolatorTest
 
 // These tests are parameterized by the isolation flag.
 static vector<string>* isolators = new vector<string>({
+#ifndef __WINDOWS__
   "posix/mem",
 #ifdef __linux__
   "cgroups/mem",
 #endif // __linux__
+#else
+  "windows/mem",
+#endif // __WINDOWS__
 });
 
 
@@ -72,7 +76,7 @@ TEST_P(MemoryIsolatorTest, ROOT_MemUsage)
   slave::Flags flags = CreateSlaveFlags();
   flags.isolation = GetParam();
 
-  Fetcher fetcher;
+  Fetcher fetcher(flags);
 
   Try<MesosContainerizer*> _containerizer =
     MesosContainerizer::create(flags, true, &fetcher);
@@ -96,8 +100,7 @@ TEST_P(MemoryIsolatorTest, ROOT_MemUsage)
       master.get()->pid,
       DEFAULT_CREDENTIAL);
 
-  EXPECT_CALL(sched, registered(&driver, _, _))
-    .Times(1);
+  EXPECT_CALL(sched, registered(&driver, _, _));
 
   Future<vector<Offer>> offers;
   EXPECT_CALL(sched, resourceOffers(&driver, _))
@@ -107,31 +110,45 @@ TEST_P(MemoryIsolatorTest, ROOT_MemUsage)
   driver.start();
 
   AWAIT_READY(offers);
-  EXPECT_NE(0u, offers.get().size());
+  ASSERT_FALSE(offers->empty());
 
-  TaskInfo task = createTask(offers.get()[0], "sleep 120");
+  TaskInfo task = createTask(offers.get()[0], SLEEP_COMMAND(120));
 
+  Future<TaskStatus> statusStarting;
   Future<TaskStatus> statusRunning;
   EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&statusStarting))
     .WillOnce(FutureArg<1>(&statusRunning));
 
   driver.launchTasks(offers.get()[0].id(), {task});
 
+  AWAIT_READY(statusStarting);
+  EXPECT_EQ(TASK_STARTING, statusStarting->state());
+
   AWAIT_READY(statusRunning);
-  EXPECT_EQ(TASK_RUNNING, statusRunning.get().state());
+  EXPECT_EQ(TASK_RUNNING, statusRunning->state());
 
   Future<hashset<ContainerID>> containers = containerizer->containers();
   AWAIT_READY(containers);
-  EXPECT_EQ(1u, containers.get().size());
+  ASSERT_EQ(1u, containers->size());
 
-  ContainerID containerId = *(containers.get().begin());
+  ContainerID containerId = *(containers->begin());
 
   Future<ResourceStatistics> usage = containerizer->usage(containerId);
   AWAIT_READY(usage);
 
   // TODO(jieyu): Consider using a program that predictably increases
   // RSS so that we can set more meaningful expectation here.
-  EXPECT_LT(0u, usage.get().mem_rss_bytes());
+#ifdef __WINDOWS__
+  // NOTE: Windows reports `mem_total_bytes` instead of `mem_rss_bytes` because
+  // of the change in meaning in 0.23.0. The `mem_rss_bytes` represents only
+  // anonymous memory usage, but the "working set size" reported by Windows
+  // corresponds to the total memory of a process in RAM.
+  EXPECT_LT(0u, usage->mem_total_bytes());
+#else
+  // TODO(andschwa): Consider testing `mem_total_bytes` for other platforms.
+  EXPECT_LT(0u, usage->mem_rss_bytes());
+#endif // __WINDOWS__
 
   driver.stop();
   driver.join();

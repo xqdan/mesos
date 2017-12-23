@@ -27,6 +27,7 @@
 #include <stout/strings.hpp>
 #include <stout/stringify.hpp>
 
+#include <stout/os/constants.hpp>
 #include <stout/os/killtree.hpp>
 #include <stout/os/read.hpp>
 #include <stout/os/write.hpp>
@@ -57,6 +58,8 @@ using std::list;
 using std::map;
 using std::string;
 using std::vector;
+
+using mesos::internal::ContainerDNSInfo;
 
 
 template <typename T>
@@ -104,9 +107,18 @@ Try<Owned<Docker>> Docker::create(
     bool validate,
     const Option<JSON::Object>& config)
 {
+#ifndef __WINDOWS__
+  // TODO(hausdorff): Currently, `path::absolute` does not handle all the edge
+  // cases of Windows. Revisit this when MESOS-3442 is resolved.
+  //
+  // NOTE: When we do come back and fix this bug, it is also worth noting that
+  // on Windows an empty value of `socket` is frequently used to connect to the
+  // Docker host (i.e., the user wants to connect 'npipes://', with an empty
+  // socket path). A full solution should accommodate this.
   if (!path::absolute(socket)) {
     return Error("Invalid Docker socket path: " + socket);
   }
+#endif // __WINDOWS__
 
   Owned<Docker> docker(new Docker(path, socket, config));
   if (!validate) {
@@ -147,7 +159,7 @@ Future<Version> Docker::version() const
 
   Try<Subprocess> s = subprocess(
       cmd,
-      Subprocess::PATH("/dev/null"),
+      Subprocess::PATH(os::DEV_NULL),
       Subprocess::PIPE(),
       Subprocess::PIPE());
 
@@ -307,11 +319,14 @@ Try<Docker::Container> Docker::Container::create(const string& output)
   bool started = startedAtValue.get().value != "0001-01-01T00:00:00Z";
 
   Option<string> ipAddress;
+  Option<string> ip6Address;
   bool findDeprecatedIP = false;
+
   Result<JSON::String> networkMode =
     json.find<JSON::String>("HostConfig.NetworkMode");
+
   if (!networkMode.isSome()) {
-    // We need to fail back to the old field as Docker added NetworkMode
+    // We need to fallback to the old field as Docker added NetworkMode
     // since Docker remote API 1.15.
     VLOG(1) << "Unable to detect HostConfig.NetworkMode, "
             << "attempting deprecated IP field";
@@ -329,13 +344,29 @@ Try<Docker::Container> Docker::Container::create(const string& output)
       json.find<JSON::String>(addressLocation);
 
     if (!ipAddressValue.isSome()) {
-      // We also need to failback to the old field as the IP Address
+      // We also need to fallback to the old field as the IP Address
       // field location also changed since Docker remote API 1.20.
       VLOG(1) << "Unable to detect IP Address at '" << addressLocation << "',"
               << " attempting deprecated field";
       findDeprecatedIP = true;
     } else if (!ipAddressValue->value.empty()) {
       ipAddress = ipAddressValue->value;
+    }
+
+    // Check if the container has an IPv6 address.
+    //
+    // NOTE: For IPv6 we don't need to worry about the old method of
+    // looking at the deprecated "NetworkSettings.IPAddress" since we
+    // want to support IPv6 addresses for docker versions that support
+    // USER mode networking, which is a relatively recent feature.
+    string address6Location = "NetworkSettings.Networks." +
+                              networkMode->value + ".GlobalIPv6Address";
+
+    Result<JSON::String> ip6AddressValue =
+      json.find<JSON::String>(address6Location);
+
+    if (ip6AddressValue.isSome() && !ip6AddressValue->value.empty()) {
+      ip6Address = ip6AddressValue->value;
     }
   }
 
@@ -397,7 +428,80 @@ Try<Docker::Container> Docker::Container::create(const string& output)
     }
   }
 
-  return Container(output, id, name, optionalPid, started, ipAddress, devices);
+  vector<string> dns;
+
+  Result<JSON::Array> dnsArray =
+    json.find<JSON::Array>("HostConfig.Dns");
+
+  if (dnsArray.isError()) {
+    return Error("Failed to parse HostConfig.Dns: " + dnsArray.error());
+  }
+
+  if (dnsArray.isSome()) {
+    foreach (const JSON::Value& entry, dnsArray->values) {
+      if (!entry.is<JSON::String>()) {
+        return Error("Malformed HostConfig.Dns"
+                     " entry '" + stringify(entry) + "'");
+      }
+
+      dns.push_back(entry.as<JSON::String>().value);
+    }
+  }
+
+  vector<string> dnsOptions;
+
+  Result<JSON::Array> dnsOptionArray =
+    json.find<JSON::Array>("HostConfig.DnsOptions");
+
+  if (dnsOptionArray.isError()) {
+    return Error("Failed to parse HostConfig.DnsOptions: " +
+                 dnsOptionArray.error());
+  }
+
+  if (dnsOptionArray.isSome()) {
+    foreach (const JSON::Value& entry, dnsOptionArray->values) {
+      if (!entry.is<JSON::String>()) {
+        return Error("Malformed HostConfig.DnsOptions"
+                     " entry '" + stringify(entry) + "'");
+      }
+
+      dnsOptions.push_back(entry.as<JSON::String>().value);
+    }
+  }
+
+  vector<string> dnsSearch;
+
+  Result<JSON::Array> dnsSearchArray =
+    json.find<JSON::Array>("HostConfig.DnsSearch");
+
+  if (dnsSearchArray.isError()) {
+    return Error("Failed to parse HostConfig.DnsSearch: " +
+                 dnsSearchArray.error());
+  }
+
+  if (dnsSearchArray.isSome()) {
+    foreach (const JSON::Value& entry, dnsSearchArray->values) {
+      if (!entry.is<JSON::String>()) {
+        return Error("Malformed HostConfig.DnsSearch"
+                     " entry '" + stringify(entry) + "'");
+      }
+
+      dnsSearch.push_back(entry.as<JSON::String>().value);
+    }
+  }
+
+  return Container(
+      output,
+      id,
+      name,
+      optionalPid,
+      started,
+      ipAddress,
+      ip6Address,
+      devices,
+      dns,
+      dnsOptions,
+      dnsSearch);
 }
 
 
@@ -486,56 +590,51 @@ Try<Docker::Image> Docker::Image::create(const JSON::Object& json)
 }
 
 
-Future<Option<int>> Docker::run(
+Try<Docker::RunOptions> Docker::RunOptions::create(
     const ContainerInfo& containerInfo,
     const CommandInfo& commandInfo,
     const string& name,
     const string& sandboxDirectory,
     const string& mappedDirectory,
     const Option<Resources>& resources,
+    bool enableCfsQuota,
     const Option<map<string, string>>& env,
     const Option<vector<Device>>& devices,
-    const process::Subprocess::IO& _stdout,
-    const process::Subprocess::IO& _stderr) const
+    const Option<ContainerDNSInfo>& defaultContainerDNS)
 {
   if (!containerInfo.has_docker()) {
-    return Failure("No docker info found in container info");
+    return Error("No docker info found in container info");
   }
 
   const ContainerInfo::DockerInfo& dockerInfo = containerInfo.docker();
 
-  vector<string> argv;
-  argv.push_back(path);
-  argv.push_back("-H");
-  argv.push_back(socket);
-  argv.push_back("run");
-
-  if (dockerInfo.privileged()) {
-    argv.push_back("--privileged");
-  }
+  RunOptions options;
+  options.privileged = dockerInfo.privileged();
 
   if (resources.isSome()) {
     // TODO(yifan): Support other resources (e.g. disk).
     Option<double> cpus = resources.get().cpus();
     if (cpus.isSome()) {
-      uint64_t cpuShare =
+      options.cpuShares =
         std::max((uint64_t) (CPU_SHARES_PER_CPU * cpus.get()), MIN_CPU_SHARES);
-      argv.push_back("--cpu-shares");
-      argv.push_back(stringify(cpuShare));
+
+      if (enableCfsQuota) {
+        const Duration quota =
+          std::max(CPU_CFS_PERIOD * cpus.get(), MIN_CPU_CFS_QUOTA);
+
+        options.cpuQuota = quota.us();
+      }
     }
 
     Option<Bytes> mem = resources.get().mem();
     if (mem.isSome()) {
-      Bytes memLimit = std::max(mem.get(), MIN_MEMORY);
-      argv.push_back("--memory");
-      argv.push_back(stringify(memLimit.bytes()));
+      options.memory = std::max(mem.get(), MIN_MEMORY);
     }
   }
 
   if (env.isSome()) {
     foreachpair (const string& key, const string& value, env.get()) {
-      argv.push_back("-e");
-      argv.push_back(key + "=" + value);
+      options.env[key] = value;
     }
   }
 
@@ -546,14 +645,11 @@ Future<Option<int>> Docker::run(
       // Skip to avoid duplicate environment variables.
       continue;
     }
-    argv.push_back("-e");
-    argv.push_back(variable.name() + "=" + variable.value());
+    options.env[variable.name()] = variable.value();
   }
 
-  argv.push_back("-e");
-  argv.push_back("MESOS_SANDBOX=" + mappedDirectory);
-  argv.push_back("-e");
-  argv.push_back("MESOS_CONTAINER_NAME=" + name);
+  options.env["MESOS_SANDBOX"] = mappedDirectory;
+  options.env["MESOS_CONTAINER_NAME"] = name;
 
   Option<string> volumeDriver;
   foreach (const Volume& volume, containerInfo.volumes()) {
@@ -571,7 +667,7 @@ Future<Option<int>> Docker::run(
       // volume in the sandbox.
       if (!path::absolute(volume.host_path()) &&
           !path::absolute(volume.container_path())) {
-        return Failure(
+        return Error(
             "Both host_path '" + volume.host_path() + "' " +
             "and container_path '" + volume.container_path() + "' " +
             "of a volume are relative");
@@ -590,7 +686,7 @@ Future<Option<int>> Docker::run(
       switch (volume.mode()) {
         case Volume::RW: volumeConfig += ":rw"; break;
         case Volume::RO: volumeConfig += ":ro"; break;
-        default: return Failure("Unsupported volume mode");
+        default: return Error("Unsupported volume mode");
       }
     } else if (volume.has_source()) {
       if (volume.source().type() != Volume::Source::DOCKER_VOLUME) {
@@ -608,7 +704,7 @@ Future<Option<int>> Docker::run(
 
         if (volumeDriver.isSome() &&
             volumeDriver.get() != currentDriver) {
-          return Failure("Only one volume driver is supported");
+          return Error("Only one volume driver is supported");
         }
 
         volumeDriver = currentDriver;
@@ -617,101 +713,79 @@ Future<Option<int>> Docker::run(
       switch (volume.mode()) {
         case Volume::RW: volumeConfig += ":rw"; break;
         case Volume::RO: volumeConfig += ":ro"; break;
-        default: return Failure("Unsupported volume mode");
+        default: return Error("Unsupported volume mode");
       }
     } else {
-      return Failure("Host path or volume source is required");
+      return Error("Host path or volume source is required");
     }
 
-    argv.push_back("-v");
-    argv.push_back(volumeConfig);
+    options.volumes.push_back(volumeConfig);
   }
 
   // Mapping sandbox directory into the container mapped directory.
-  argv.push_back("-v");
-  argv.push_back(sandboxDirectory + ":" + mappedDirectory);
+  options.volumes.push_back(sandboxDirectory + ":" + mappedDirectory);
 
   // TODO(gyliu513): Deprecate this after the release cycle of 1.0.
   // It will be replaced by Volume.Source.DockerVolume.driver.
   if (dockerInfo.has_volume_driver()) {
     if (volumeDriver.isSome() &&
         volumeDriver.get() != dockerInfo.volume_driver()) {
-      return Failure("Only one volume driver per task is supported");
+      return Error("Only one volume driver per task is supported");
     }
 
     volumeDriver = dockerInfo.volume_driver();
   }
 
-  if (volumeDriver.isSome()) {
-    argv.push_back("--volume-driver=" + volumeDriver.get());
-  }
+  options.volumeDriver = volumeDriver;
 
-  const string& image = dockerInfo.image();
-
-  argv.push_back("--net");
-  string network;
   switch (dockerInfo.network()) {
-    case ContainerInfo::DockerInfo::HOST: network = "host"; break;
-    case ContainerInfo::DockerInfo::BRIDGE: network = "bridge"; break;
-    case ContainerInfo::DockerInfo::NONE: network = "none"; break;
+    case ContainerInfo::DockerInfo::HOST: options.network = "host"; break;
+    case ContainerInfo::DockerInfo::BRIDGE: options.network = "bridge"; break;
+    case ContainerInfo::DockerInfo::NONE: options.network = "none"; break;
     case ContainerInfo::DockerInfo::USER: {
-      // User defined networks require docker version >= 1.9.0.
-      Try<Nothing> validateVer = validateVersion(Version(1, 9, 0));
-
-      if (validateVer.isError()) {
-        return Failure("User defined networks require Docker "
-                       "version 1.9.0 or higher");
-      }
-
       if (containerInfo.network_infos_size() == 0) {
-        return Failure("No network info found in container info");
+        return Error("No network info found in container info");
       }
 
       if (containerInfo.network_infos_size() > 1) {
-        return Failure("Only a single network can be defined in Docker run");
+        return Error("Only a single network can be defined in Docker run");
       }
 
       const NetworkInfo& networkInfo = containerInfo.network_infos(0);
       if(!networkInfo.has_name()){
-        return Failure("No network name found in network info");
+        return Error("No network name found in network info");
       }
 
-      network = networkInfo.name();
+      options.network = networkInfo.name();
       break;
     }
-    default: return Failure("Unsupported Network mode: " +
-                            stringify(dockerInfo.network()));
+    default: return Error("Unsupported Network mode: " +
+                          stringify(dockerInfo.network()));
   }
-
-  argv.push_back(network);
 
   if (containerInfo.has_hostname()) {
-    if (network == "host") {
-      return Failure("Unable to set hostname with host network mode");
+    if (options.network.isSome() && options.network.get() == "host") {
+      return Error("Unable to set hostname with host network mode");
     }
 
-    argv.push_back("--hostname");
-    argv.push_back(containerInfo.hostname());
-  }
-
-  foreach (const Parameter& parameter, dockerInfo.parameters()) {
-    argv.push_back("--" + parameter.key() + "=" + parameter.value());
+    options.hostname = containerInfo.hostname();
   }
 
   if (dockerInfo.port_mappings().size() > 0) {
-    if (network == "host" || network == "none") {
-      return Failure("Port mappings are only supported for bridge and "
-                     "user-defined networks");
+    if (options.network.isSome() &&
+        (options.network.get() == "host" || options.network.get() == "none")) {
+      return Error("Port mappings are only supported for bridge and "
+                   "user-defined networks");
     }
 
     if (!resources.isSome()) {
-      return Failure("Port mappings require resources");
+      return Error("Port mappings require resources");
     }
 
     Option<Value::Ranges> portRanges = resources.get().ports();
 
     if (!portRanges.isSome()) {
-      return Failure("Port mappings require port resources");
+      return Error("Port mappings require port resources");
     }
 
     foreach (const ContainerInfo::DockerInfo::PortMapping& mapping,
@@ -726,124 +800,334 @@ Future<Option<int>> Docker::run(
       }
 
       if (!found) {
-        return Failure("Port [" + stringify(mapping.host_port()) + "] not " +
-                       "included in resources");
+        return Error("Port [" + stringify(mapping.host_port()) + "] not " +
+                     "included in resources");
       }
 
-      string portMapping = stringify(mapping.host_port()) + ":" +
-                           stringify(mapping.container_port());
+      Docker::PortMapping portMapping;
+      portMapping.hostPort = mapping.host_port();
+      portMapping.containerPort = mapping.container_port();
 
       if (mapping.has_protocol()) {
-        portMapping += "/" + strings::lower(mapping.protocol());
+        portMapping.protocol = mapping.protocol();
       }
 
-      argv.push_back("-p");
-      argv.push_back(portMapping);
+      options.portMappings.push_back(portMapping);
     }
   }
 
   if (devices.isSome()) {
-    foreach (const Device& device, devices.get()) {
-      if (!device.hostPath.absolute()) {
-        return Failure("Device path '" + device.hostPath.string() + "'"
-                       " is not an absolute path");
-      }
+    options.devices = devices.get();
+  }
 
-      string permissions;
-      permissions += device.access.read ? "r" : "";
-      permissions += device.access.write ? "w" : "";
-      permissions += device.access.mknod ? "m" : "";
+  options.name = name;
 
-      // Docker doesn't handle this case (it fails by saying
-      // that an absolute path is not being provided).
-      if (permissions.empty()) {
-        return Failure("At least one access required for --devices:"
-                       " none specified for"
-                       " '" + device.hostPath.string() + "'");
-      }
+  bool dnsSpecified = false;
+  foreach (const Parameter& parameter, dockerInfo.parameters()) {
+    options.additionalOptions.push_back(
+        "--" + parameter.key() + "=" + parameter.value());
 
-      // Note that docker silently does not handle default devices
-      // passed in with restricted permissions (e.g. /dev/null), so
-      // we don't bother checking this case either.
-
-      argv.push_back("--device=" +
-                     device.hostPath.string() + ":" +
-                     device.containerPath.string() + ":" +
-                     permissions);
+    // In Docker 1.13.0, `--dns-option` was added and `--dns-opt` was hidden
+    // (but it can still be used), so here we need to check both of them.
+    if (!dnsSpecified &&
+        (parameter.key() == "dns" ||
+         parameter.key() == "dns-search" ||
+         parameter.key() == "dns-opt" ||
+         parameter.key() == "dns-option")) {
+      dnsSpecified = true;
     }
   }
+
+  if (!dnsSpecified && defaultContainerDNS.isSome()) {
+    Option<ContainerDNSInfo::DockerInfo> bridgeDNS;
+    Option<ContainerDNSInfo::DockerInfo> defaultUserDNS;
+    hashmap<string, ContainerDNSInfo::DockerInfo> userDNSMap;
+
+    foreach (const ContainerDNSInfo::DockerInfo& dnsInfo,
+             defaultContainerDNS->docker()) {
+      // Currently we only support setting DNS for containers which join
+      // Docker bridge network or user-defined network.
+      if (dnsInfo.network_mode() == ContainerDNSInfo::DockerInfo::BRIDGE) {
+        bridgeDNS = dnsInfo;
+      } else if (dnsInfo.network_mode() == ContainerDNSInfo::DockerInfo::USER) {
+        if (!dnsInfo.has_network_name()) {
+          // The DNS info which has network node set as `USER` and has no
+          // network name set is considered as the default DNS for all
+          // user-defined networks. It applies to the Docker container which
+          // joins a user-defined network but that network can not be found in
+          // `defaultContainerDNS`.
+          defaultUserDNS = dnsInfo;
+        } else {
+          userDNSMap[dnsInfo.network_name()] = dnsInfo;
+        }
+      }
+    }
+
+    auto setDNSInfo = [&](const ContainerDNSInfo::DockerInfo& dnsInfo) {
+      options.dns.assign(
+          dnsInfo.dns().nameservers().begin(),
+          dnsInfo.dns().nameservers().end());
+
+      options.dnsSearch.assign(
+          dnsInfo.dns().search().begin(),
+          dnsInfo.dns().search().end());
+
+      options.dnsOpt.assign(
+          dnsInfo.dns().options().begin(),
+          dnsInfo.dns().options().end());
+    };
+
+    if (dockerInfo.network() == ContainerInfo::DockerInfo::BRIDGE &&
+        bridgeDNS.isSome()) {
+      setDNSInfo(bridgeDNS.get());
+    } else if (dockerInfo.network() == ContainerInfo::DockerInfo::USER) {
+      if (userDNSMap.contains(options.network.get())) {
+        setDNSInfo(userDNSMap.at(options.network.get()));
+      } else if (defaultUserDNS.isSome()) {
+        setDNSInfo(defaultUserDNS.get());
+      }
+    }
+  }
+
+  options.image = dockerInfo.image();
 
   if (commandInfo.shell()) {
     // We override the entrypoint if shell is enabled because we
-    // assume the user intends to run the command within /bin/sh
+    // assume the user intends to run the command within a shell
     // and not the default entrypoint of the image. View MESOS-1770
     // for more details.
-    argv.push_back("--entrypoint");
-    argv.push_back("/bin/sh");
+#ifdef __WINDOWS__
+    options.entrypoint = "cmd";
+#else
+    options.entrypoint = "/bin/sh";
+#endif // __WINDOWS__
   }
-
-  argv.push_back("--name");
-  argv.push_back(name);
-  argv.push_back(image);
 
   if (commandInfo.shell()) {
     if (!commandInfo.has_value()) {
-      return Failure("Shell specified but no command value provided");
+      return Error("Shell specified but no command value provided");
     }
 
-    // Adding -c here because Docker cli only supports a single word
-    // for overriding entrypoint, so adding the -c flag for /bin/sh
-    // as part of the command.
-    argv.push_back("-c");
-    argv.push_back(commandInfo.value());
+    // The Docker CLI only supports a single word for overriding the
+    // entrypoint, so we must specify `-c` (or `/c` on Windows)
+    // for the other parts of the command.
+#ifdef __WINDOWS__
+    options.arguments.push_back("/c");
+#else
+    options.arguments.push_back("-c");
+#endif // __WINDOWS__
+
+    options.arguments.push_back(commandInfo.value());
   } else {
     if (commandInfo.has_value()) {
-      argv.push_back(commandInfo.value());
+      options.arguments.push_back(commandInfo.value());
     }
 
     foreach (const string& argument, commandInfo.arguments()) {
-      argv.push_back(argument);
+      options.arguments.push_back(argument);
     }
+  }
+
+  return options;
+}
+
+
+Future<Option<int>> Docker::run(
+    const Docker::RunOptions& options,
+    const process::Subprocess::IO& _stdout,
+    const process::Subprocess::IO& _stderr) const
+{
+  vector<string> argv;
+  argv.push_back(path);
+  argv.push_back("-H");
+  argv.push_back(socket);
+  argv.push_back("run");
+
+  if (options.privileged) {
+    argv.push_back("--privileged");
+  }
+
+  if (options.cpuShares.isSome()) {
+    argv.push_back("--cpu-shares");
+    argv.push_back(stringify(options.cpuShares.get()));
+  }
+
+  if (options.cpuQuota.isSome()) {
+    argv.push_back("--cpu-quota");
+    argv.push_back(stringify(options.cpuQuota.get()));
+  }
+
+  if (options.memory.isSome()) {
+    argv.push_back("--memory");
+    argv.push_back(stringify(options.memory->bytes()));
+  }
+
+  foreachpair(const string& key, const string& value, options.env) {
+    argv.push_back("-e");
+    argv.push_back(key + "=" + value);
+  }
+
+  foreach(const string& volume, options.volumes) {
+    argv.push_back("-v");
+    argv.push_back(volume);
+  }
+
+  if (options.volumeDriver.isSome()) {
+    argv.push_back("--volume-driver=" + options.volumeDriver.get());
+  }
+
+  if (options.network.isSome()) {
+    const string& network = options.network.get();
+    argv.push_back("--net");
+    argv.push_back(network);
+
+    if (network != "host" &&
+        network != "bridge" &&
+        network != "none") {
+      // User defined networks require Docker version >= 1.9.0.
+      Try<Nothing> validateVer = validateVersion(Version(1, 9, 0));
+      if (validateVer.isError()) {
+        return Failure("User defined networks require Docker "
+                       "version 1.9.0 or higher");
+      }
+    }
+
+    if (network == "host" && !options.dns.empty()) {
+      // `--dns` option with host network requires Docker version >= 1.12.0,
+      // see https://github.com/moby/moby/pull/22408 for details.
+      Try<Nothing> validateVer = validateVersion(Version(1, 12, 0));
+      if (validateVer.isError()) {
+        return Failure("--dns option with host network requires Docker "
+                       "version 1.12.0 or higher");
+      }
+    }
+  }
+
+  foreach (const string& dns, options.dns) {
+    argv.push_back("--dns");
+    argv.push_back(dns);
+  }
+
+  foreach (const string& search, options.dnsSearch) {
+    argv.push_back("--dns-search");
+    argv.push_back(search);
+  }
+
+  if (!options.dnsOpt.empty()) {
+    // `--dns-opt` option requires Docker version >= 1.9.0,
+    // see https://github.com/moby/moby/pull/16031 for details.
+    Try<Nothing> validateVer = validateVersion(Version(1, 9, 0));
+    if (validateVer.isError()) {
+      return Failure("--dns-opt option requires Docker "
+                     "version 1.9.0 or higher");
+    }
+  }
+
+  foreach (const string& opt, options.dnsOpt) {
+    argv.push_back("--dns-opt");
+    argv.push_back(opt);
+  }
+
+  if (options.hostname.isSome()) {
+    argv.push_back("--hostname");
+    argv.push_back(options.hostname.get());
+  }
+
+  foreach (const Docker::PortMapping& mapping, options.portMappings) {
+    argv.push_back("-p");
+
+    string portMapping = stringify(mapping.hostPort) + ":" +
+                         stringify(mapping.containerPort);
+
+    if (mapping.protocol.isSome()) {
+      portMapping += "/" + strings::lower(mapping.protocol.get());
+    }
+
+    argv.push_back(portMapping);
+  }
+
+  foreach (const Device& device, options.devices) {
+    if (!device.hostPath.absolute()) {
+      return Failure("Device path '" + device.hostPath.string() + "'"
+                     " is not an absolute path");
+    }
+
+    string permissions;
+    permissions += device.access.read ? "r" : "";
+    permissions += device.access.write ? "w" : "";
+    permissions += device.access.mknod ? "m" : "";
+
+    // Docker doesn't handle this case (it fails by saying
+    // that an absolute path is not being provided).
+    if (permissions.empty()) {
+      return Failure("At least one access required for --devices:"
+                     " none specified for"
+                     " '" + device.hostPath.string() + "'");
+    }
+
+    // Note that docker silently does not handle default devices
+    // passed in with restricted permissions (e.g. /dev/null), so
+    // we don't bother checking this case either.
+    argv.push_back(
+        "--device=" +
+        device.hostPath.string() + ":" +
+        device.containerPath.string() + ":" +
+        permissions);
+  }
+
+  if (options.entrypoint.isSome()) {
+    argv.push_back("--entrypoint");
+    argv.push_back(options.entrypoint.get());
+  }
+
+  if (options.name.isSome()) {
+    argv.push_back("--name");
+    argv.push_back(options.name.get());
+  }
+
+  foreach (const string& option, options.additionalOptions) {
+    argv.push_back(option);
+  }
+
+  argv.push_back(options.image);
+
+  foreach(const string& argument, options.arguments) {
+    argv.push_back(argument);
   }
 
   string cmd = strings::join(" ", argv);
 
-  LOG(INFO) << "Running " << cmd;
-
-  map<string, string> environment = os::environment();
-
-  // NOTE: This is non-relevant to pick up a docker config file,
-  // which is necessary for private registry.
-  environment["HOME"] = sandboxDirectory;
+  VLOG(1) << "Running " << cmd;
 
   Try<Subprocess> s = subprocess(
       path,
       argv,
-      Subprocess::PATH("/dev/null"),
+      Subprocess::PATH(os::DEV_NULL),
       _stdout,
       _stderr,
-      nullptr,
-      environment);
+      nullptr);
 
   if (s.isError()) {
-    return Failure("Failed to create subprocess '" + cmd + "': " + s.error());
+    return Failure("Failed to create subprocess '" + path + "': " + s.error());
   }
 
-  s->status()
-    .onDiscard(lambda::bind(&commandDiscarded, s.get(), cmd));
+  s->status().onDiscard(lambda::bind(&commandDiscarded, s.get(), cmd));
 
   // Ideally we could capture the stderr when docker itself fails,
   // however due to the stderr redirection used here we cannot.
   //
   // TODO(bmahler): Determine a way to redirect stderr while still
   // capturing the stderr when 'docker run' itself fails. E.g. we
-  // could use 'docker logs' in conjuction with a "detached" form
+  // could use 'docker logs' in conjunction with a "detached" form
   // of 'docker run' to isolate 'docker run' failure messages from
   // the container stderr.
   return s->status();
 }
 
-
+// NOTE: A known issue in Docker 1.12/1.13 sometimes leaks its mount
+// namespace, causing `docker rm` to fail. As a workaround, we do a
+// best-effort `docker rm` and log the error insteaf of return a
+// failure when `remove` is set to true (MESOS-7777).
 Future<Nothing> Docker::stop(
     const string& containerName,
     const Duration& timeout,
@@ -862,8 +1146,8 @@ Future<Nothing> Docker::stop(
 
   Try<Subprocess> s = subprocess(
       cmd,
-      Subprocess::PATH("/dev/null"),
-      Subprocess::PATH("/dev/null"),
+      Subprocess::PATH(os::DEV_NULL),
+      Subprocess::PATH(os::DEV_NULL),
       Subprocess::PIPE());
 
   if (s.isError()) {
@@ -880,6 +1164,7 @@ Future<Nothing> Docker::stop(
         remove));
 }
 
+
 Future<Nothing> Docker::_stop(
     const Docker& docker,
     const string& containerName,
@@ -891,7 +1176,12 @@ Future<Nothing> Docker::_stop(
 
   if (remove) {
     bool force = !status.isSome() || status.get() != 0;
-    return docker.rm(containerName, force);
+    return docker.rm(containerName, force)
+      .repair([=](const Future<Nothing>& future) {
+        LOG(ERROR) << "Unable to remove Docker container '"
+                   << containerName + "': " << future.failure();
+        return Nothing();
+      });
   }
 
   return checkError(cmd, s);
@@ -910,8 +1200,8 @@ Future<Nothing> Docker::kill(
 
   Try<Subprocess> s = subprocess(
       cmd,
-      Subprocess::PATH("/dev/null"),
-      Subprocess::PATH("/dev/null"),
+      Subprocess::PATH(os::DEV_NULL),
+      Subprocess::PATH(os::DEV_NULL),
       Subprocess::PIPE());
 
   if (s.isError()) {
@@ -935,8 +1225,8 @@ Future<Nothing> Docker::rm(
 
   Try<Subprocess> s = subprocess(
       cmd,
-      Subprocess::PATH("/dev/null"),
-      Subprocess::PATH("/dev/null"),
+      Subprocess::PATH(os::DEV_NULL),
+      Subprocess::PATH(os::DEV_NULL),
       Subprocess::PIPE());
 
   if (s.isError()) {
@@ -953,7 +1243,7 @@ Future<Docker::Container> Docker::inspect(
 {
   Owned<Promise<Docker::Container>> promise(new Promise<Docker::Container>());
 
-  const string cmd =  path + " -H " + socket + " inspect " + containerName;
+  const string cmd = path + " -H " + socket + " inspect " + containerName;
   _inspect(cmd, promise, retryInterval);
 
   return promise->future();
@@ -974,7 +1264,7 @@ void Docker::_inspect(
 
   Try<Subprocess> s = subprocess(
       cmd,
-      Subprocess::PATH("/dev/null"),
+      Subprocess::PATH(os::DEV_NULL),
       Subprocess::PIPE(),
       Subprocess::PIPE());
 
@@ -1093,7 +1383,7 @@ Future<list<Docker::Container>> Docker::ps(
 
   Try<Subprocess> s = subprocess(
       cmd,
-      Subprocess::PATH("/dev/null"),
+      Subprocess::PATH(os::DEV_NULL),
       Subprocess::PIPE(),
       Subprocess::PIPE());
 
@@ -1162,6 +1452,7 @@ Future<list<Docker::Container>> Docker::__ps(
 
   return promise->future();
 }
+
 
 // TODO(chenlily): Generalize functionality into a concurrency limiter
 // within libprocess.
@@ -1262,7 +1553,7 @@ Future<Docker::Image> Docker::pull(
   Try<Subprocess> s = subprocess(
       path,
       argv,
-      Subprocess::PATH("/dev/null"),
+      Subprocess::PATH(os::DEV_NULL),
       Subprocess::PIPE(),
       Subprocess::PIPE(),
       nullptr);
@@ -1398,7 +1689,7 @@ Future<Docker::Image> Docker::__pull(
   Try<Subprocess> s_ = subprocess(
       path,
       argv,
-      Subprocess::PATH("/dev/null"),
+      Subprocess::PATH(os::DEV_NULL),
       Subprocess::PIPE(),
       Subprocess::PIPE(),
       nullptr,
@@ -1444,7 +1735,7 @@ Future<Docker::Image> Docker::___pull(
   Option<int> status = s.status().get();
 
   if (!status.isSome()) {
-    return Failure("No status found from '" +  cmd + "'");
+    return Failure("No status found from '" + cmd + "'");
   } else if (status.get() != 0) {
     return io::read(s.err().get())
       .then(lambda::bind(&failure<Image>, cmd, status.get(), lambda::_1));

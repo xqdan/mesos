@@ -78,7 +78,8 @@ string HadoopFetcherPlugin::name() const
 
 Future<Nothing> HadoopFetcherPlugin::fetch(
     const URI& uri,
-    const string& directory) const
+    const string& directory,
+    const Option<string>& data) const
 {
   // TODO(jieyu): Validate the given URI.
 
@@ -98,7 +99,7 @@ Future<Nothing> HadoopFetcherPlugin::fetch(
   // configuration file.
   //
   // TODO(jieyu): Allow user to specify the name of the output file.
-  return hdfs.get()->copyToLocal(
+  return hdfs->copyToLocal(
       (uri.has_host() ? stringify(uri) : uri.path()),
       path::join(directory, Path(uri.path()).basename()));
 }

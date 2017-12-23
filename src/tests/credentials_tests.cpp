@@ -18,6 +18,8 @@
 
 #include <gmock/gmock.h>
 
+#include <stout/uri.hpp>
+
 #include <process/gmock.hpp>
 #include <process/owned.hpp>
 #include <process/pid.hpp>
@@ -65,7 +67,7 @@ TEST_F(CredentialsTest, AuthenticatedSlave)
   ASSERT_SOME(slave);
 
   AWAIT_READY(slaveRegisteredMessage);
-  ASSERT_NE("", slaveRegisteredMessage.get().slave_id().value());
+  ASSERT_NE("", slaveRegisteredMessage->slave_id().value());
 }
 
 
@@ -74,24 +76,25 @@ TEST_F(CredentialsTest, AuthenticatedSlave)
 // backwards compatibility.
 TEST_F(CredentialsTest, AuthenticatedSlaveText)
 {
-  string path =  path::join(os::getcwd(), "credentials");
+  string path = path::join(os::getcwd(), "credentials");
 
-  Try<int> fd = os::open(
+  Try<int_fd> fd = os::open(
       path,
       O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC,
       S_IRUSR | S_IWUSR | S_IRGRP);
 
-  CHECK_SOME(fd);
+  ASSERT_SOME(fd);
 
   string credentials =
     DEFAULT_CREDENTIAL.principal() + " " + DEFAULT_CREDENTIAL.secret();
 
-  CHECK_SOME(os::write(fd.get(), credentials))
+  ASSERT_SOME(os::write(fd.get(), credentials))
       << "Failed to write credentials to '" << path << "'";
 
-  CHECK_SOME(os::close(fd.get()));
+  ASSERT_SOME(os::close(fd.get()));
 
-  map<string, Option<string>> values{{"credentials", Some("file://" + path)}};
+  map<string, Option<string>> values{
+    {"credentials", Some(uri::from_path(path))}};
 
   master::Flags masterFlags = CreateMasterFlags();
   masterFlags.load(values, true);
@@ -110,7 +113,7 @@ TEST_F(CredentialsTest, AuthenticatedSlaveText)
   ASSERT_SOME(slave);
 
   AWAIT_READY(slaveRegisteredMessage);
-  ASSERT_NE("", slaveRegisteredMessage.get().slave_id().value());
+  ASSERT_NE("", slaveRegisteredMessage->slave_id().value());
 }
 
 
@@ -118,14 +121,14 @@ TEST_F(CredentialsTest, AuthenticatedSlaveText)
 // protobuf tools assistance.
 TEST_F(CredentialsTest, AuthenticatedSlaveJSON)
 {
-  string path =  path::join(os::getcwd(), "credentials");
+  string path = path::join(os::getcwd(), "credentials");
 
-  Try<int> fd = os::open(
+  Try<int_fd> fd = os::open(
       path,
       O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC,
       S_IRUSR | S_IWUSR | S_IRGRP);
 
-  CHECK_SOME(fd);
+  ASSERT_SOME(fd);
 
   // This unit tests our capacity to process JSON credentials without
   // using our protobuf tools.
@@ -139,12 +142,13 @@ TEST_F(CredentialsTest, AuthenticatedSlaveJSON)
   JSON::Object credentials;
   credentials.values["credentials"] = array;
 
-  CHECK_SOME(os::write(fd.get(), stringify(credentials)))
+  ASSERT_SOME(os::write(fd.get(), stringify(credentials)))
       << "Failed to write credentials to '" << path << "'";
 
-  CHECK_SOME(os::close(fd.get()));
+  ASSERT_SOME(os::close(fd.get()));
 
-  map<string, Option<string>> values{{"credentials", Some("file://" + path)}};
+  map<string, Option<string>> values{
+    {"credentials", Some(uri::from_path(path))}};
 
   master::Flags masterFlags = CreateMasterFlags();
   masterFlags.load(values, true);
@@ -163,7 +167,7 @@ TEST_F(CredentialsTest, AuthenticatedSlaveJSON)
   ASSERT_SOME(slave);
 
   AWAIT_READY(slaveRegisteredMessage);
-  ASSERT_NE("", slaveRegisteredMessage.get().slave_id().value());
+  ASSERT_NE("", slaveRegisteredMessage->slave_id().value());
 }
 
 } // namespace tests {

@@ -14,26 +14,26 @@
 #define __STOUT_HASHMAP_HPP__
 
 #include <functional>
+#include <iosfwd>
 #include <list>
 #include <map>
 #include <unordered_map>
 #include <utility>
-
-#include <boost/get_pointer.hpp>
 
 #include "foreach.hpp"
 #include "hashset.hpp"
 #include "none.hpp"
 #include "option.hpp"
 
-
 // Provides a hash map via 'std::unordered_map'. We inherit from it to add
 // new functions as well as to provide better names for some of the
 // existing functions.
-
 template <typename Key,
           typename Value,
-          typename Hash = std::hash<Key>,
+          typename Hash = typename std::conditional<
+            std::is_enum<Key>::value,
+            EnumClassHash,
+            std::hash<Key>>::type,
           typename Equal = std::equal_to<Key>>
 class hashmap : public std::unordered_map<Key, Value, Hash, Equal>
 {
@@ -139,5 +139,12 @@ public:
     return result;
   }
 };
+
+
+template <typename K, typename V>
+std::ostream& operator<<(std::ostream& stream, const hashmap<K, V>& map)
+{
+  return stream << stringify(map);
+}
 
 #endif // __STOUT_HASHMAP_HPP__

@@ -27,31 +27,36 @@
 
 namespace process {
 namespace network {
+namespace internal {
 
-class LibeventSSLSocketImpl : public Socket::Impl
+class LibeventSSLSocketImpl : public SocketImpl
 {
 public:
   // See 'Socket::create()'.
-  static Try<std::shared_ptr<Socket::Impl>> create(int s);
+  static Try<std::shared_ptr<SocketImpl>> create(int_fd s);
 
-  LibeventSSLSocketImpl(int _s);
+  LibeventSSLSocketImpl(int_fd _s);
 
-  virtual ~LibeventSSLSocketImpl();
+  ~LibeventSSLSocketImpl() override;
 
-  // Implement 'Socket::Impl' interface.
-  virtual Future<Nothing> connect(const Address& address);
-  virtual Future<size_t> recv(char* data, size_t size);
+  // Implement 'SocketImpl' interface.
+  Future<Nothing> connect(const Address& address) override;
+  Future<size_t> recv(char* data, size_t size) override;
   // Send does not currently support discard. See implementation.
-  virtual Future<size_t> send(const char* data, size_t size);
-  virtual Future<size_t> sendfile(int fd, off_t offset, size_t size);
-  virtual Try<Nothing> listen(int backlog);
-  virtual Future<Socket> accept();
-  virtual Socket::Kind kind() const { return Socket::SSL; }
+  Future<size_t> send(const char* data, size_t size) override;
+  Future<size_t> sendfile(int_fd fd, off_t offset, size_t size) override;
+  Try<Nothing> listen(int backlog) override;
+  Future<std::shared_ptr<SocketImpl>> accept() override;
+  SocketImpl::Kind kind() const override { return SocketImpl::Kind::SSL; }
 
-  // This call is used to do the equivalent of shutting down the read
-  // end. This means finishing the future of any outstanding read
-  // request.
-  virtual Try<Nothing> shutdown();
+  // Shuts down the socket.
+  //
+  // NOTE: Although this method accepts an integer which specifies the
+  // shutdown mode, this parameter is ignored because SSL connections
+  // do not have a concept of read/write-only shutdown. If either end
+  // of the socket is closed, then the futures of any outstanding read
+  // requests will be completed (possibly as failures).
+  Try<Nothing> shutdown(int how) override;
 
   // We need a post-initializer because 'shared_from_this()' is not
   // valid until the constructor has finished.
@@ -66,7 +71,7 @@ private:
   struct AcceptRequest
   {
     AcceptRequest(
-        int _socket,
+        int_fd _socket,
         evconnlistener* _listener,
         const Option<net::IP>& _ip)
       : peek_event(nullptr),
@@ -74,9 +79,9 @@ private:
         socket(_socket),
         ip(_ip) {}
     event* peek_event;
-    Promise<Socket> promise;
+    Promise<std::shared_ptr<SocketImpl>> promise;
     evconnlistener* listener;
-    int socket;
+    int_fd socket;
     Option<net::IP> ip;
   };
 
@@ -105,7 +110,7 @@ private:
   // This is a private constructor used by the accept helper
   // functions.
   LibeventSSLSocketImpl(
-      int _s,
+      int_fd _s,
       bufferevent* bev,
       Option<std::string>&& peer_hostname);
 
@@ -149,6 +154,11 @@ private:
   Owned<SendRequest> send_request;
   Owned<ConnectRequest> connect_request;
 
+  // Indicates whether or not an EOF has been received on this socket.
+  // Our accesses to this member are not synchronized because they all
+  // occur within the event loop, which runs on a single thread.
+  bool received_eof = false;
+
   // This is a weak pointer to 'this', i.e., ourselves, this class
   // instance. We need this for our event loop callbacks because it's
   // possible that we'll actually want to cleanup this socket impl
@@ -175,12 +185,13 @@ private:
   // downgraded). The 'accept()' call returns sockets from this queue.
   // We wrap the socket in a 'Future' so that we can pass failures or
   // discards through.
-  Queue<Future<Socket>> accept_queue;
+  Queue<Future<std::shared_ptr<SocketImpl>>> accept_queue;
 
   Option<std::string> peer_hostname;
   Option<net::IP> peer_ip;
 };
 
+} // namespace internal {
 } // namespace network {
 } // namespace process {
 

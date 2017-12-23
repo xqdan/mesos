@@ -16,17 +16,19 @@ layout: community_section
 
     <h3>Contribute</h3>
     <h3 name="reportbugs">Report or track a bug</h3>
-    <p>New bugs can be reported on our <a href="http://issues.apache.org/jira/browse/MESOS">issue tracker</a>. In order to create a new issue, you'll need to signup for an account. See the guidelines <a href="/documentation/latest/reporting-a-bug/">here</a>.</p>
+    <p>New bugs can be reported on our <a href="http://issues.apache.org/jira/browse/MESOS">issue tracker</a>. In order to create a new issue, you'll need to signup for an account. See the guidelines <a href="/documentation/latest/reporting-an-issue/">here</a>.</p>
 
-    <h3 name="contribute">Contribute a core patch</h3>
-    <p>Follow our <a href="/documentation/latest/submitting-a-patch">contribution guidelines</a> when submitting a patch. We love patches. :)</p>
+    <h3 name="contribute">Contribute a patch</h3>
+    <p>Mesos relies on its community to test releases, find bugs, contribute fixes and features, and provide feedback on existing APIs. Your contributions are greatly appreciated! Since the infrastructure that the Mesos community uses day-to-day (ReviewBoard and JIRA) is unfamiliar to some, we also provide a beginner contribution guide which will help you get started using only GitHub.</p>
+    <p>Is this your first time contributing? See our <a href="/documentation/latest/beginner-contribution">beginner contribution guide</a>. Thanks! We love patches. :)</p>
+    <p>Looking to go deeper? Find out how to make larger contributions in the <a href="/documentation/latest/advanced-contribution">advanced contribution guidelines</a>.</p>
 
     <h3 name="workinggroups">Working Groups</h3>
 
     <p>
     As the community has scaled, we work on larger and more involved features and components in separate interest or <i>working</i> groups.
-    We keep track of these working groups <a href="https://cwiki.apache.org/confluence/display/MESOS/Apache+Mesos+Working+Groups">here</a>.
-    In this list, you will be able to get in touch with the stakeholders, contributors and committers interested in certain features for Mesos and join in on the design meetings.
+    We keep track of these working groups <a href="http://mesos.apache.org/documentation/latest/working-groups/">here</a>.
+    In this list, you will be able to get in touch with the stakeholders, contributors and committers interested in certain features for Mesos, join in on the design meetings and see videos of past meetings.
     </p>
 
   </div>

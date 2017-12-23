@@ -22,6 +22,7 @@
 #include <mesos/agent/agent.hpp>
 
 #include <mesos/mesos.hpp>
+#include <mesos/resources.hpp>
 
 #include <mesos/master/master.hpp>
 
@@ -30,6 +31,8 @@
 #include <mesos/master/master.hpp>
 
 #include <mesos/maintenance/maintenance.hpp>
+
+#include <mesos/resource_provider/resource_provider.hpp>
 
 #include <mesos/scheduler/scheduler.hpp>
 
@@ -41,6 +44,8 @@
 #include <mesos/v1/executor/executor.hpp>
 
 #include <mesos/v1/master/master.hpp>
+
+#include <mesos/v1/resource_provider/resource_provider.hpp>
 
 #include <mesos/v1/maintenance/maintenance.hpp>
 
@@ -57,6 +62,7 @@ namespace internal {
 // Helpers for evolving types between versions. Please add as necessary!
 v1::AgentID evolve(const SlaveID& slaveId);
 v1::AgentInfo evolve(const SlaveInfo& slaveInfo);
+v1::DomainInfo evolve(const DomainInfo& domainInfo);
 v1::ExecutorID evolve(const ExecutorID& executorId);
 v1::ExecutorInfo evolve(const ExecutorInfo& executorInfo);
 v1::FileInfo evolve(const FileInfo& fileInfo);
@@ -69,6 +75,7 @@ v1::MasterInfo evolve(const MasterInfo& masterInfo);
 v1::Offer evolve(const Offer& offer);
 v1::OfferID evolve(const OfferID& offerId);
 v1::Resource evolve(const Resource& resource);
+v1::ResourceProviderID evolve(const ResourceProviderID& resourceProviderId);
 v1::Resources evolve(const Resources& resources);
 v1::Task evolve(const Task& task);
 v1::TaskID evolve(const TaskID& taskId);
@@ -76,6 +83,7 @@ v1::TaskInfo evolve(const TaskInfo& taskInfo);
 v1::TaskStatus evolve(const TaskStatus& status);
 
 v1::agent::Call evolve(const mesos::agent::Call& call);
+v1::agent::ProcessIO evolve(const mesos::agent::ProcessIO& processIO);
 v1::agent::Response evolve(const mesos::agent::Response& response);
 
 v1::maintenance::ClusterStatus evolve(
@@ -83,6 +91,12 @@ v1::maintenance::ClusterStatus evolve(
 v1::maintenance::Schedule evolve(const maintenance::Schedule& schedule);
 
 v1::master::Response evolve(const mesos::master::Response& response);
+
+
+v1::resource_provider::Call evolve(const mesos::resource_provider::Call& call);
+v1::resource_provider::Event evolve(
+    const mesos::resource_provider::Event& event);
+
 
 v1::scheduler::Call evolve(const scheduler::Call& call);
 

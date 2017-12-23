@@ -13,6 +13,23 @@
 #ifndef __STOUT_WINDOWS_HPP__
 #define __STOUT_WINDOWS_HPP__
 
+// We include `WinSock2.h` before `Windows.h` explicitly to avoid symbol
+// re-definitions. This is a documented pattern, because `Windows.h` will
+// otherwise include `winsock.h` for "historical reasons". Note that
+// `winsock.h` is for Windows Sockets 1.1, last used in Windows 2000.
+//
+// NOTE: The capitalization of these headers is based on the files
+// included in the SDK, rather than MSDN documentation.
+//
+// https://msdn.microsoft.com/en-us/library/windows/desktop/ms738562(v=vs.85).aspx
+// NOLINT(whitespace/line_length)
+#include <WinSock2.h> // For Windows Sockets 2.
+#include <WS2tcpip.h> // For `getaddrinfo` etc.
+#include <iphlpapi.h> // For `GetAdaptersInfo`.
+#include <MSWSock.h>  // For `TransmitFile`.
+#include <winioctl.h> // For `DeviceIoControl`
+#include <Windows.h>  // For everything else.
+
 #include <direct.h>   // For `_mkdir`.
 #include <errno.h>    // For `_set_errno`.
 #include <fcntl.h>    // For file access flags like `_O_CREAT`.
@@ -22,31 +39,40 @@
 
 #include <sys/stat.h> // For permissions flags.
 
-#include <BaseTsd.h>  // For `SSIZE_T`.
-// We include `Winsock2.h` before `Windows.h` explicitly to avoid symbold
-// re-definitions. This is a known pattern in the windows community.
-#include <WS2tcpip.h>
-#include <Winsock2.h>
-#include <mswsock.h>
-#include <winioctl.h>
-#include <Windows.h>
+#include <basetsd.h>  // For `SSIZE_T`.
 
 #include <memory>
 
+#include <glog/logging.h>
 
-#ifdef _UNICODE
-// Much of the core Windows API is available both in `string` and `wstring`
+
+#if !defined(_UNICODE) || !defined(UNICODE)
+// Much of the Windows API is available both in `string` and `wstring`
 // varieties. To avoid polluting the namespace with two versions of every
 // function, a common pattern in the Windows headers is to offer a single macro
 // that expands to the `string` or `wstring` version, depending on whether the
-// `_UNICODE` preprocessor symbol is set. For example, `GetMessage` will expand
-// to either `GetMessageA` (the `string` version) or `GetMessageW` (the
-// `wstring` version) depending on whether this symbol is defined.
+// `_UNICODE` and `UNICODE` preprocessor symbols are set. For example,
+// `GetMessage` will expand to either `GetMessageA` (the `string` version) or
+// `GetMessageW` (the `wstring` version) depending on whether these symbols are
+// defined.
 //
-// The downside of this is that it makes POSIX interop really hard. Hence, we
-// refuse to compile if such a symbol is passed in during compilation.
-#error "Mesos doesn't currently support the `_UNICODE` Windows header constant"
-#endif // _UNICODE
+// Unfortunately the `string` version is not UTF-8, like a developer would
+// expect on Linux, but is instead the current Windows code page, and thus may
+// take a different value at runtime. This makes it potentially difficult to
+// decode, whereas the `wstring` version is always encoded as UTF-16, and thus
+// can be programatically converted to UTF-8 using the `stringify()` function
+// (converting UTF-8 to UTF-16 is done with `wide_stringify()`).
+//
+// Furthermore, support for NTFS long paths requires the use of the `wstring`
+// APIs, coupled with the `\\?\` long path prefix marker for paths longer than
+// the max path limit. This is accomplished by wrapping paths sent to Windows
+// APIs with the `internal::windows::longpath()` helper. In order to prevent
+// future regressions, we enforce the definitions of `_UNICODE` and `UNICODE`.
+//
+// NOTE: The Mesos code should always use the explicit `W` suffixed APIs in
+// order to avoid type ambiguity.
+#error "Mesos must be built with `_UNICODE` and `UNICODE` defined."
+#endif // !defined(_UNICODE) || !defined(UNICODE)
 
 // An RAII `HANDLE`.
 class SharedHandle : public std::shared_ptr<void>
@@ -55,6 +81,14 @@ class SharedHandle : public std::shared_ptr<void>
                 "Expected `HANDLE` to be of type `void*`.");
 
 public:
+  // We delete the default constructor so that the callsite is forced to make
+  // an explicit decision about what the empty `HANDLE` value should be, as it
+  // is not the same for all `HANDLE` types.  For example, `OpenProcess`
+  // returns a `nullptr` for an invalid handle, but `CreateFile` returns an
+  // `INVALID_HANDLE_VALUE` instead. This inconsistency is inherent in the
+  // Windows API.
+  SharedHandle() = delete;
+
   template <typename Deleter>
   SharedHandle(HANDLE handle, Deleter deleter)
       : std::shared_ptr<void>(handle, deleter) {}
@@ -131,17 +165,7 @@ inline BOOL GetMessage(
 #define X_OK 0x0 // No such permission on Windows.
 #define F_OK 0x0
 
-#define O_RDONLY _O_RDONLY
-#define O_WRONLY _O_WRONLY
-#define O_RDWR _O_RDWR
-#define O_CREAT _O_CREAT
-#define O_TRUNC _O_TRUNC
-#define O_APPEND _O_APPEND
-#define O_CLOEXEC _O_NOINHERIT
-
-// TODO(hausdorff): (MESOS-3398) Not defined on Windows. This value is
-// temporary.
-#define MAXHOSTNAMELEN 64
+#define MAXHOSTNAMELEN NI_MAXHOST
 
 #define PATH_MAX _MAX_PATH
 
@@ -171,6 +195,8 @@ typedef SSIZE_T ssize_t;
 // the Windows versions of these flags to their POSIX equivalents so we don't
 // have to change any socket code.
 constexpr int SHUT_RD = SD_RECEIVE;
+constexpr int SHUT_WR = SD_SEND;
+constexpr int SHUT_RDWR = SD_BOTH;
 constexpr int MSG_NOSIGNAL = 0; // `SIGPIPE` signal does not exist on Windows.
 
 // The following functions are usually macros on POSIX; we provide them here as
@@ -182,30 +208,36 @@ inline bool S_ISDIR(const int mode)
   return (mode & S_IFMT) == S_IFDIR; // Directory.
 }
 
+
 inline bool S_ISREG(const int mode)
 {
   return (mode & S_IFMT) == S_IFREG;  // File.
 }
+
 
 inline bool S_ISCHR(const int mode)
 {
   return (mode & S_IFMT) == S_IFCHR;  // Character device.
 }
 
+
 inline bool S_ISFIFO(const int mode)
 {
   return (mode & S_IFMT) == _S_IFIFO; // Pipe.
 }
+
 
 inline bool S_ISBLK(const int mode)
 {
   return false;                       // Block special device.
 }
 
+
 inline bool S_ISSOCK(const int mode)
 {
   return false;                       // Socket.
 }
+
 
 inline bool S_ISLNK(const int mode)
 {
@@ -319,83 +351,6 @@ inline auto strerror_r(int errnum, char* buffer, size_t length) ->
 decltype(strerror_s(buffer, length, errnum))
 {
   return strerror_s(buffer, length, errnum);
-}
-
-
-// File I/O function aliases.
-//
-// NOTE: The use of `auto` and the trailing return type in the following
-// functions are meant to make it easier for Linux developers to use and
-// maintain the code. It is an explicit marker that we are using the compiler
-// to guarantee that the return type is identical to whatever is in the Windows
-// implementation of the standard.
-inline auto write(int fd, const void* buffer, size_t count) ->
-decltype(_write(fd, buffer, static_cast<unsigned int>(count)))
-{
-  return _write(fd, buffer, static_cast<unsigned int>(count));
-}
-
-
-
-inline auto chdir(const char* path) ->
-decltype(_chdir(path))
-{
-  return _chdir(path);
-}
-
-
-inline auto getcwd(char* path, int maxlen) ->
-decltype(_getcwd(path, maxlen))
-{
-  return _getcwd(path, maxlen);
-}
-
-
-inline auto mkdir(const char* path, mode_t mode) ->
-decltype(_mkdir(path))
-{
-  return _mkdir(path);
-}
-
-
-inline auto mktemp(char* path) ->
-decltype(_mktemp(path))
-{
-  return _mktemp(path);
-}
-
-
-inline auto mkstemp(char* path) ->
-decltype(_mktemp_s(path, strlen(path) + 1))
-{
-  // NOTE: in the POSIX spec, `mkstemp` will generate a random filename from
-  // the `path` template, `open` that filename, and return the resulting file
-  // descriptor. On Windows, `_mktemp_s` will actually only generate the path,
-  // so here we actually have to call `open` ourselves to get a file descriptor
-  // we can return as a result.
-  if (_mktemp_s(path, strlen(path) + 1) != 0) {
-    return -1;
-  }
-
-  // NOTE: We open the file with read / write access for the given user, an
-  // attempt to match POSIX's specification of `mkstemp`. We use `_S_IREAD` and
-  // `_S_IWRITE` here instead of the POSIX equivalents. On Windows the file is
-  // is not present, we use `_O_CREAT` option when opening the file.
-  return _open(path, _O_CREAT, _S_IREAD | _S_IWRITE);
-}
-
-
-inline auto realpath(const char* path, char* resolved) ->
-decltype(_fullpath(resolved, path, PATH_MAX))
-{
-  return _fullpath(resolved, path, PATH_MAX);
-}
-
-
-inline auto access(const char* fileName, int accessMode) ->
-decltype(_access(fileName, accessMode))
-{
-  return _access(fileName, accessMode);
 }
 
 

@@ -64,11 +64,13 @@ void Metrics::add(const string& client)
         // The client may have been removed if the dispatch
         // occurs after the client is removed but before the
         // metric is removed.
-        if (sorter->contains(client)) {
-          return sorter->calculateShare(client);
+        DRFSorter::Node* sorterClient = sorter->find(client);
+
+        if (sorterClient == nullptr) {
+          return 0.0;
         }
 
-        return 0.0;
+        return sorter->calculateShare(sorterClient);
       }));
 
   dominantShares.put(client, gauge);

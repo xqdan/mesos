@@ -20,11 +20,19 @@
 #include <mesos/http.hpp>
 #include <mesos/roles.hpp>
 
+#include <process/clock.hpp>
+#include <process/future.hpp>
+#include <process/gtest.hpp>
+#include <process/http.hpp>
 #include <process/owned.hpp>
 #include <process/pid.hpp>
 
+#include <stout/none.hpp>
+#include <stout/nothing.hpp>
+
 #include "tests/containerizer.hpp"
 #include "tests/mesos.hpp"
+#include "tests/resources_utils.hpp"
 
 using mesos::internal::master::Master;
 using mesos::internal::slave::Slave;
@@ -36,10 +44,14 @@ using std::vector;
 
 using google::protobuf::RepeatedPtrField;
 
+using process::Clock;
+using process::Failure;
 using process::Future;
 using process::Owned;
 using process::PID;
 
+using process::http::Accepted;
+using process::http::Headers;
 using process::http::OK;
 using process::http::Response;
 using process::http::Unauthorized;
@@ -58,7 +70,7 @@ class RoleTest : public MesosTest {};
 TEST_F(RoleTest, BadRegister)
 {
   FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
-  frameworkInfo.set_role("invalid");
+  frameworkInfo.set_roles(0, "invalid");
 
   master::Flags masterFlags = CreateMasterFlags();
   masterFlags.roles = "foo,bar";
@@ -103,7 +115,7 @@ TEST_F(RoleTest, ImplicitRoleRegister)
   ASSERT_SOME(slave);
 
   FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
-  frameworkInfo.set_role("new-role-name");
+  frameworkInfo.set_roles(0, "new-role-name");
 
   MockScheduler sched;
   MesosSchedulerDriver driver(
@@ -115,9 +127,9 @@ TEST_F(RoleTest, ImplicitRoleRegister)
   filters.set_refuse_seconds(0);
 
   Resources unreserved = Resources::parse("disk:1024").get();
-  Resources dynamicallyReserved = unreserved.flatten(
-      frameworkInfo.role(),
-      createReservationInfo(frameworkInfo.principal())).get();
+  Resources dynamicallyReserved =
+    unreserved.pushReservation(createDynamicReservationInfo(
+        frameworkInfo.roles(0), frameworkInfo.principal()));
 
   // We use this to capture offers from `resourceOffers`.
   Future<vector<Offer>> offers;
@@ -133,11 +145,13 @@ TEST_F(RoleTest, ImplicitRoleRegister)
   // In the first offer, expect an offer with unreserved resources.
   AWAIT_READY(offers);
 
-  ASSERT_EQ(1u, offers.get().size());
+  ASSERT_EQ(1u, offers->size());
   Offer offer = offers.get()[0];
 
-  EXPECT_TRUE(Resources(offer.resources()).contains(unreserved));
-  EXPECT_FALSE(Resources(offer.resources()).contains(dynamicallyReserved));
+  EXPECT_TRUE(Resources(offer.resources()).contains(
+      allocatedResources(unreserved, frameworkInfo.roles(0))));
+  EXPECT_FALSE(Resources(offer.resources()).contains(
+      allocatedResources(dynamicallyReserved, frameworkInfo.roles(0))));
 
   // The expectation for the next offer.
   EXPECT_CALL(sched, resourceOffers(&driver, _))
@@ -149,15 +163,17 @@ TEST_F(RoleTest, ImplicitRoleRegister)
   // In the next offer, expect an offer with reserved resources.
   AWAIT_READY(offers);
 
-  ASSERT_EQ(1u, offers.get().size());
+  ASSERT_EQ(1u, offers->size());
   offer = offers.get()[0];
 
-  EXPECT_TRUE(Resources(offer.resources()).contains(dynamicallyReserved));
-  EXPECT_FALSE(Resources(offer.resources()).contains(unreserved));
+  EXPECT_TRUE(Resources(offer.resources()).contains(
+      allocatedResources(dynamicallyReserved, frameworkInfo.roles(0))));
+  EXPECT_FALSE(Resources(offer.resources()).contains(
+      allocatedResources(unreserved, frameworkInfo.roles(0))));
 
   Resources volume = createPersistentVolume(
       Megabytes(64),
-      frameworkInfo.role(),
+      frameworkInfo.roles(0),
       "id1",
       "path1",
       frameworkInfo.principal(),
@@ -173,12 +189,15 @@ TEST_F(RoleTest, ImplicitRoleRegister)
   // In the next offer, expect an offer with a persistent volume.
   AWAIT_READY(offers);
 
-  ASSERT_EQ(1u, offers.get().size());
+  ASSERT_EQ(1u, offers->size());
   offer = offers.get()[0];
 
-  EXPECT_TRUE(Resources(offer.resources()).contains(volume));
-  EXPECT_FALSE(Resources(offer.resources()).contains(dynamicallyReserved));
-  EXPECT_FALSE(Resources(offer.resources()).contains(unreserved));
+  EXPECT_TRUE(Resources(offer.resources()).contains(
+      allocatedResources(volume, frameworkInfo.roles(0))));
+  EXPECT_FALSE(Resources(offer.resources()).contains(
+      allocatedResources(dynamicallyReserved, frameworkInfo.roles(0))));
+  EXPECT_FALSE(Resources(offer.resources()).contains(
+      allocatedResources(unreserved, frameworkInfo.roles(0))));
 
   driver.stop();
   driver.join();
@@ -208,7 +227,7 @@ TEST_F(RoleTest, ImplicitRoleStaticReservation)
   ASSERT_SOME(slave);
 
   FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
-  frameworkInfo.set_role("role");
+  frameworkInfo.set_roles(0, "role");
 
   MockScheduler sched;
   MesosSchedulerDriver driver(
@@ -235,10 +254,11 @@ TEST_F(RoleTest, ImplicitRoleStaticReservation)
 
   AWAIT_READY(offers);
 
-  ASSERT_EQ(1u, offers.get().size());
+  ASSERT_EQ(1u, offers->size());
   Offer offer = offers.get()[0];
 
-  EXPECT_TRUE(Resources(offer.resources()).contains(staticallyReserved));
+  EXPECT_TRUE(Resources(offer.resources()).contains(
+      allocatedResources(staticallyReserved, frameworkInfo.roles(0))));
 
   // Create a task to launch with the resources of `staticallyReserved`.
   TaskInfo taskInfo =
@@ -265,7 +285,7 @@ TEST_F(RoleTest, ImplicitRoleStaticReservation)
 
 // This test checks that the "/roles" endpoint returns the expected
 // information when there are no active roles.
-TEST_F(RoleTest, EndpointEmpty)
+TEST_F_TEMP_DISABLED_ON_WINDOWS(RoleTest, EndpointEmpty)
 {
   Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
@@ -276,29 +296,16 @@ TEST_F(RoleTest, EndpointEmpty)
       None(),
       createBasicAuthHeaders(DEFAULT_CREDENTIAL));
 
-  AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response)
-    << response.get().body;
+  AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response);
 
   AWAIT_EXPECT_RESPONSE_HEADER_EQ(APPLICATION_JSON, "Content-Type", response);
 
-  Try<JSON::Value> parse = JSON::parse(response.get().body);
+  Try<JSON::Value> parse = JSON::parse(response->body);
   ASSERT_SOME(parse);
 
   Try<JSON::Value> expected = JSON::parse(
       "{"
-      "  \"roles\": ["
-      "    {"
-      "      \"frameworks\": [],"
-      "      \"name\": \"*\","
-      "      \"resources\": {"
-      "        \"cpus\": 0,"
-      "        \"disk\": 0,"
-      "        \"gpus\": 0,"
-      "        \"mem\":  0"
-      "      },"
-      "      \"weight\": 1.0"
-      "    }"
-      "  ]"
+      "  \"roles\": []"
       "}");
 
   ASSERT_SOME(expected);
@@ -324,12 +331,11 @@ TEST_F(RoleTest, EndpointNoFrameworks)
       None(),
       createBasicAuthHeaders(DEFAULT_CREDENTIAL));
 
-  AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response)
-    << response.get().body;
+  AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response);
 
   AWAIT_EXPECT_RESPONSE_HEADER_EQ(APPLICATION_JSON, "Content-Type", response);
 
-  Try<JSON::Value> parse = JSON::parse(response.get().body);
+  Try<JSON::Value> parse = JSON::parse(response->body);
   ASSERT_SOME(parse);
 
   Try<JSON::Value> expected = JSON::parse(
@@ -376,10 +382,79 @@ TEST_F(RoleTest, EndpointNoFrameworks)
 }
 
 
+// This test ensures that quota information is included
+// in /roles endpoint of master.
+TEST_F_TEMP_DISABLED_ON_WINDOWS(RoleTest, RolesEndpointContainsQuota)
+{
+  Try<Owned<cluster::Master>> master = StartMaster();
+  ASSERT_SOME(master);
+
+  Resources quotaResources = Resources::parse("cpus:1;mem:512").get();
+
+  mesos::quota::QuotaRequest request;
+  request.set_role("foo");
+  request.mutable_guarantee()->CopyFrom(quotaResources);
+
+  // Use the force flag for setting quota that cannot be satisfied in
+  // this empty cluster without any agents.
+  request.set_force(true);
+
+  {
+    Future<Response> response = process::http::post(
+        master.get()->pid,
+        "quota",
+        createBasicAuthHeaders(DEFAULT_CREDENTIAL),
+        stringify(JSON::protobuf(request)));
+
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response);
+  }
+
+  // Query the master roles endpoint and check it contains quota.
+  {
+    Future<Response> response = process::http::get(
+        master.get()->pid,
+        "roles",
+        None(),
+        createBasicAuthHeaders(DEFAULT_CREDENTIAL));
+
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response);
+
+    Try<JSON::Object> parse = JSON::parse<JSON::Object>(response->body);
+    ASSERT_SOME(parse);
+
+    Result<JSON::Array> roles = parse->find<JSON::Array>("roles");
+    ASSERT_SOME(roles);
+    EXPECT_EQ(1u, roles->values.size());
+
+    JSON::Value role = roles->values[0].as<JSON::Value>();
+
+    Try<JSON::Value> expected = JSON::parse(
+        "{"
+          "\"quota\":"
+            "{"
+              "\"guarantee\":"
+                "{"
+                  "\"cpus\":1.0,"
+                  "\"disk\":0,"
+                  "\"gpus\":0,"
+                  "\"mem\":512.0"
+                "},"
+              "\"principal\":\"test-principal\","
+              "\"role\":\"foo\""
+            "}"
+        "}"
+    );
+    ASSERT_SOME(expected);
+
+    EXPECT_TRUE(role.contains(expected.get()));
+  }
+}
+
+
 // This test checks that when using implicit roles, the "/roles"
 // endpoint shows roles that have a configured weight even if they
 // have no registered frameworks.
-TEST_F(RoleTest, EndpointImplicitRolesWeights)
+TEST_F_TEMP_DISABLED_ON_WINDOWS(RoleTest, EndpointImplicitRolesWeights)
 {
   master::Flags masterFlags = CreateMasterFlags();
   masterFlags.weights = "roleX=5,roleY=4";
@@ -388,7 +463,7 @@ TEST_F(RoleTest, EndpointImplicitRolesWeights)
   ASSERT_SOME(master);
 
   FrameworkInfo frameworkInfo1 = DEFAULT_FRAMEWORK_INFO;
-  frameworkInfo1.set_role("roleX");
+  frameworkInfo1.set_roles(0, "roleX");
 
   MockScheduler sched1;
   MesosSchedulerDriver driver1(
@@ -396,12 +471,12 @@ TEST_F(RoleTest, EndpointImplicitRolesWeights)
 
   Future<FrameworkID> frameworkId1;
   EXPECT_CALL(sched1, registered(&driver1, _, _))
-    .WillOnce(FutureArg<1>(&frameworkId1));;
+    .WillOnce(FutureArg<1>(&frameworkId1));
 
   driver1.start();
 
   FrameworkInfo frameworkInfo2 = DEFAULT_FRAMEWORK_INFO;
-  frameworkInfo2.set_role("roleZ");
+  frameworkInfo2.set_roles(0, "roleZ");
 
   MockScheduler sched2;
   MesosSchedulerDriver driver2(
@@ -409,7 +484,7 @@ TEST_F(RoleTest, EndpointImplicitRolesWeights)
 
   Future<FrameworkID> frameworkId2;
   EXPECT_CALL(sched2, registered(&driver2, _, _))
-    .WillOnce(FutureArg<1>(&frameworkId2));;
+    .WillOnce(FutureArg<1>(&frameworkId2));
 
   driver2.start();
 
@@ -422,30 +497,18 @@ TEST_F(RoleTest, EndpointImplicitRolesWeights)
       None(),
       createBasicAuthHeaders(DEFAULT_CREDENTIAL));
 
-  AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response)
-    << response.get().body;
+  AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response);
 
   AWAIT_EXPECT_RESPONSE_HEADER_EQ(APPLICATION_JSON, "Content-Type", response);
 
-  Try<JSON::Value> parse = JSON::parse(response.get().body);
+  Try<JSON::Value> parse = JSON::parse(response->body);
   ASSERT_SOME(parse);
 
   Try<JSON::Value> expected = JSON::parse(
       "{"
       "  \"roles\": ["
       "    {"
-      "      \"frameworks\": [],"
-      "      \"name\": \"*\","
-      "      \"resources\": {"
-      "        \"cpus\": 0,"
-      "        \"disk\": 0,"
-      "        \"gpus\": 0,"
-      "        \"mem\":  0"
-      "      },"
-      "      \"weight\": 1.0"
-      "    },"
-      "    {"
-      "      \"frameworks\": [\"" + frameworkId1.get().value() + "\"],"
+      "      \"frameworks\": [\"" + frameworkId1->value() + "\"],"
       "      \"name\": \"roleX\","
       "      \"resources\": {"
       "        \"cpus\": 0,"
@@ -467,7 +530,7 @@ TEST_F(RoleTest, EndpointImplicitRolesWeights)
       "      \"weight\": 4.0"
       "    },"
       "    {"
-      "      \"frameworks\": [\"" + frameworkId2.get().value() + "\"],"
+      "      \"frameworks\": [\"" + frameworkId2->value() + "\"],"
       "      \"name\": \"roleZ\","
       "      \"resources\": {"
       "        \"cpus\": 0,"
@@ -494,7 +557,7 @@ TEST_F(RoleTest, EndpointImplicitRolesWeights)
 // This test checks that when using implicit roles, the "/roles"
 // endpoint shows roles that have a configured quota even if they have
 // no registered frameworks.
-TEST_F(RoleTest, EndpointImplicitRolesQuotas)
+TEST_F_TEMP_DISABLED_ON_WINDOWS(RoleTest, EndpointImplicitRolesQuotas)
 {
   Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
@@ -518,7 +581,7 @@ TEST_F(RoleTest, EndpointImplicitRolesQuotas)
       quotaRequestBody);
 
   AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, quotaResponse)
-    << quotaResponse.get().body;
+    << quotaResponse->body;
 
   Future<Response> rolesResponse = process::http::get(
       master.get()->pid,
@@ -527,28 +590,17 @@ TEST_F(RoleTest, EndpointImplicitRolesQuotas)
       createBasicAuthHeaders(DEFAULT_CREDENTIAL));
 
   AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, rolesResponse)
-    << rolesResponse.get().body;
+    << rolesResponse->body;
 
   AWAIT_EXPECT_RESPONSE_HEADER_EQ(
       APPLICATION_JSON, "Content-Type", rolesResponse);
 
-  Try<JSON::Value> parse = JSON::parse(rolesResponse.get().body);
+  Try<JSON::Value> parse = JSON::parse(rolesResponse->body);
   ASSERT_SOME(parse);
 
   Try<JSON::Value> expected = JSON::parse(
       "{"
       "  \"roles\": ["
-      "    {"
-      "      \"frameworks\": [],"
-      "      \"name\": \"*\","
-      "      \"resources\": {"
-      "        \"cpus\": 0,"
-      "        \"disk\": 0,"
-      "        \"gpus\": 0,"
-      "        \"mem\":  0"
-      "      },"
-      "      \"weight\": 1.0"
-      "    },"
       "    {"
       "      \"frameworks\": [],"
       "      \"name\": \"non-existent-role\","
@@ -564,7 +616,7 @@ TEST_F(RoleTest, EndpointImplicitRolesQuotas)
       "}");
 
   ASSERT_SOME(expected);
-  EXPECT_EQ(expected.get(), parse.get());
+  EXPECT_TRUE(parse->contains(expected.get()));
 
   // Remove the quota, and check that the role no longer appears in
   // the "/roles" endpoint.
@@ -574,7 +626,7 @@ TEST_F(RoleTest, EndpointImplicitRolesQuotas)
       createBasicAuthHeaders(DEFAULT_CREDENTIAL));
 
   AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, deleteResponse)
-    << deleteResponse.get().body;
+    << deleteResponse->body;
 
   rolesResponse = process::http::get(
       master.get()->pid,
@@ -583,29 +635,17 @@ TEST_F(RoleTest, EndpointImplicitRolesQuotas)
       createBasicAuthHeaders(DEFAULT_CREDENTIAL));
 
   AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, rolesResponse)
-    << rolesResponse.get().body;
+    << rolesResponse->body;
 
   AWAIT_EXPECT_RESPONSE_HEADER_EQ(
       APPLICATION_JSON, "Content-Type", rolesResponse);
 
-  parse = JSON::parse(rolesResponse.get().body);
+  parse = JSON::parse(rolesResponse->body);
   ASSERT_SOME(parse);
 
   expected = JSON::parse(
       "{"
-      "  \"roles\": ["
-      "    {"
-      "      \"frameworks\": [],"
-      "      \"name\": \"*\","
-      "      \"resources\": {"
-      "        \"cpus\": 0,"
-      "        \"disk\": 0,"
-      "        \"gpus\": 0,"
-      "        \"mem\":  0"
-      "      },"
-      "      \"weight\": 1.0"
-      "    }"
-      "  ]"
+      "  \"roles\": []"
       "}");
 
   ASSERT_SOME(expected);
@@ -613,8 +653,122 @@ TEST_F(RoleTest, EndpointImplicitRolesQuotas)
 }
 
 
+// This test ensures that master adds/removes all roles of
+// a multi-role framework when it registers/terminates.
+TEST_F_TEMP_DISABLED_ON_WINDOWS(
+    RoleTest,
+    AddAndRemoveFrameworkWithMultipleRoles)
+{
+  // When we test removeFramework later in this test, we have to
+  // be sure the teardown call is processed completely before
+  // sending request to `getRoles` API.
+  Clock::pause();
+
+  Try<Owned<cluster::Master>> master = StartMaster();
+  ASSERT_SOME(master);
+
+  FrameworkInfo framework = DEFAULT_FRAMEWORK_INFO;
+  framework.set_roles(0, "role1");
+  framework.add_roles("role2");
+
+  MockScheduler sched;
+  MesosSchedulerDriver driver(
+      &sched, framework, master.get()->pid, DEFAULT_CREDENTIAL);
+
+  Future<FrameworkID> frameworkId;
+  EXPECT_CALL(sched, registered(&driver, _, _))
+    .WillOnce(FutureArg<1>(&frameworkId));;
+
+  driver.start();
+
+  AWAIT_READY(frameworkId);
+
+  // Tests all roles of the multi-role framework are added.
+  {
+    Future<Response> response = process::http::get(
+        master.get()->pid,
+        "roles",
+        None(),
+        createBasicAuthHeaders(DEFAULT_CREDENTIAL));
+
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response);
+
+    Try<JSON::Value> parse = JSON::parse(response->body);
+    ASSERT_SOME(parse);
+
+    Try<JSON::Value> expected = JSON::parse(
+        "{"
+        "  \"roles\": ["
+        "    {"
+        "      \"frameworks\": [\"" + frameworkId->value() + "\"],"
+        "      \"name\": \"role1\","
+        "      \"resources\": {"
+        "        \"cpus\": 0,"
+        "        \"disk\": 0,"
+        "        \"gpus\": 0,"
+        "        \"mem\":  0"
+        "      },"
+        "      \"weight\": 1.0"
+        "    },"
+        "    {"
+        "      \"frameworks\": [\"" + frameworkId->value() + "\"],"
+        "      \"name\": \"role2\","
+        "      \"resources\": {"
+        "        \"cpus\": 0,"
+        "        \"disk\": 0,"
+        "        \"gpus\": 0,"
+        "        \"mem\":  0"
+        "      },"
+        "      \"weight\": 1.0"
+        "    }"
+        "  ]"
+        "}");
+
+    ASSERT_SOME(expected);
+
+    EXPECT_EQ(expected.get(), parse.get());
+  }
+
+  // Set expectation that Master receives teardown call.
+  Future<mesos::scheduler::Call> teardownCall = FUTURE_CALL(
+      mesos::scheduler::Call(), mesos::scheduler::Call::TEARDOWN, _, _);
+
+  driver.stop();
+  driver.join();
+
+  // Wait for teardown call to be dispatched.
+  AWAIT_READY(teardownCall);
+
+  // Make sure the teardown call is processed completely.
+  Clock::settle();
+
+  // Tests all roles of multi-role framework are removed.
+  {
+    Future<Response> response = process::http::get(
+        master.get()->pid,
+        "roles",
+        None(),
+        createBasicAuthHeaders(DEFAULT_CREDENTIAL));
+
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response);
+
+    Try<JSON::Value> parse = JSON::parse(response->body);
+    ASSERT_SOME(parse);
+
+    Try<JSON::Value> expected = JSON::parse(
+        "{"
+        "  \"roles\": []"
+        "}");
+
+    ASSERT_SOME(expected);
+
+    EXPECT_EQ(expected.get(), parse.get());
+  }
+}
+
+
 // This tests the parse function of roles.
-TEST(RolesTest, Parsing)
+TEST_F(RoleTest, Parsing)
 {
   vector<string> v = {"abc", "edf", "hgi"};
 
@@ -637,7 +791,7 @@ TEST(RolesTest, Parsing)
 // This tests the validate functions of roles. Keep in mind that
 // roles::validate returns Option<Error>, so it will return None() when
 // validation succeeds, or Error() when validation fails.
-TEST(RolesTest, Validate)
+TEST_F(RoleTest, Validate)
 {
   EXPECT_NONE(roles::validate("foo"));
   EXPECT_NONE(roles::validate("123"));
@@ -646,6 +800,11 @@ TEST(RolesTest, Validate)
   EXPECT_NONE(roles::validate("foo-bar"));
   EXPECT_NONE(roles::validate("foo.bar"));
   EXPECT_NONE(roles::validate("foo..bar"));
+  EXPECT_NONE(roles::validate("..."));
+  EXPECT_NONE(roles::validate("foo/bar"));
+  EXPECT_NONE(roles::validate("foo/.bar"));
+  EXPECT_NONE(roles::validate("foo/bar/baz"));
+  EXPECT_NONE(roles::validate("a/b/c/d/e/f/g/h"));
 
   EXPECT_SOME(roles::validate(""));
   EXPECT_SOME(roles::validate("."));
@@ -653,13 +812,39 @@ TEST(RolesTest, Validate)
   EXPECT_SOME(roles::validate("-foo"));
   EXPECT_SOME(roles::validate("/"));
   EXPECT_SOME(roles::validate("/foo"));
+  EXPECT_SOME(roles::validate("foo/"));
+  EXPECT_SOME(roles::validate("foo//bar"));
+  EXPECT_SOME(roles::validate("foo/bar/"));
   EXPECT_SOME(roles::validate("foo bar"));
   EXPECT_SOME(roles::validate("foo\tbar"));
   EXPECT_SOME(roles::validate("foo\nbar"));
 
+  EXPECT_SOME(roles::validate("./."));
+  EXPECT_SOME(roles::validate("../.."));
+  EXPECT_SOME(roles::validate("./foo"));
+  EXPECT_SOME(roles::validate("../foo"));
+  EXPECT_SOME(roles::validate("foo/."));
+  EXPECT_SOME(roles::validate("foo/.."));
+  EXPECT_SOME(roles::validate("foo/./bar"));
+  EXPECT_SOME(roles::validate("foo/../bar"));
+  EXPECT_SOME(roles::validate("foo/-bar"));
+  EXPECT_SOME(roles::validate("foo/*"));
+  EXPECT_SOME(roles::validate("foo/*/bar"));
+  EXPECT_SOME(roles::validate("*/foo"));
+
   EXPECT_NONE(roles::validate({"foo", "bar", "*"}));
 
   EXPECT_SOME(roles::validate({"foo", ".", "*"}));
+}
+
+
+TEST_F(RoleTest, isStrictSubroleOf)
+{
+  EXPECT_TRUE(roles::isStrictSubroleOf("foo/bar", "foo"));
+  EXPECT_TRUE(roles::isStrictSubroleOf("foo/bar/baz", "foo"));
+  EXPECT_FALSE(roles::isStrictSubroleOf("foo", "foo"));
+  EXPECT_FALSE(roles::isStrictSubroleOf("bar", "foo"));
+  EXPECT_FALSE(roles::isStrictSubroleOf("foobar", "foo"));
 }
 
 
@@ -691,6 +876,187 @@ TEST_F(RoleTest, EndpointBadAuthentication)
     createBasicAuthHeaders(badCredential));
 
   AWAIT_EXPECT_RESPONSE_STATUS_EQ(Unauthorized({}).status, response);
+}
+
+
+// This test confirms that our handling of persistent volumes from hierarchical
+// roles does not cause leaking of volumes. Since hierarchical roles contain
+// literal `/` an implementation not taking this into account could map the name
+// of a hierarchical role `A/B` onto a directory hierarchy `A/B`. If the
+// persistent volume with persistence id `ID` and role `ROLE` is mapped to a
+// path `ROLE/ID`, it becomes impossible to distinguish the last component of a
+// hierarchical role from a persistence id.
+//
+// This performs the following checks:
+//
+// 1) Run two tasks with volumes whose role and id overlap on the file system in
+// the naive implementation. The tasks should not be able to see each others
+// volumes.
+//
+// 2) Destroy the previously created volumes in an order such that the in the
+// naive implementation less nested volume is destroyed first. This should not
+// destroy the more nested volume (e.g., since it is not created as a
+// subdirectory).
+//
+// TODO(bbannier): Figure out a way to run the test command on Windows.
+TEST_F_TEMP_DISABLED_ON_WINDOWS(RoleTest, VolumesInOverlappingHierarchies)
+{
+  constexpr char PATH[] = "path";
+  constexpr Bytes DISK_SIZE = Megabytes(1);
+
+  Try<Owned<cluster::Master>> master = StartMaster();
+  ASSERT_SOME(master);
+
+  // Capture the SlaveID so we can use it in create/destroy volumes API calls.
+  Future<SlaveRegisteredMessage> slaveRegisteredMessage =
+    FUTURE_PROTOBUF(SlaveRegisteredMessage(), _, _);
+
+  Owned<MasterDetector> detector = master.get()->createDetector();
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get());
+  ASSERT_SOME(slave);
+
+  AWAIT_READY(slaveRegisteredMessage);
+  const SlaveID slaveId = slaveRegisteredMessage->slave_id();
+
+  // Helper function which starts a framework in a role and creates a
+  // persistent volume with the given id. The framework creates a task
+  // using the volume and makes sure that no volumes from other roles
+  // are leaked into the volume.
+  auto runTask = [&master, &PATH](
+      const string& role, const string& id) {
+    FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
+    frameworkInfo.set_roles(0, role);
+
+    MockScheduler sched;
+    MesosSchedulerDriver driver(
+        &sched, frameworkInfo, master.get()->pid, DEFAULT_CREDENTIAL);
+
+    EXPECT_CALL(sched, registered(&driver, _, _));
+
+    Future<vector<Offer>> offers;
+    EXPECT_CALL(sched, resourceOffers(&driver, _))
+      .WillOnce(FutureArg<1>(&offers))
+      .WillRepeatedly(Return()); // Ignore subsequent offers.
+
+    driver.start();
+
+    AWAIT_READY(offers);
+
+    ASSERT_FALSE(offers->empty());
+
+    // Create a reserved disk. We only create a small disk so
+    // we have remaining disk to offer to other frameworks.
+    Resource reservedDisk = createReservedResource(
+        "disk",
+        "1",
+        createDynamicReservationInfo(role, DEFAULT_CREDENTIAL.principal()));
+
+    // Create a persistent volume on the reserved disk.
+    Resource volume = createPersistentVolume(
+        reservedDisk,
+        id,
+        PATH,
+        DEFAULT_CREDENTIAL.principal(),
+        frameworkInfo.principal());
+
+    // Create a task which uses the volume and checks that
+    // it contains no files leaked from another role.
+    const Offer& offer = offers.get()[0];
+
+    Resources cpusMem =
+      Resources(offer.resources()).filter([](const Resource& r) {
+        return r.name() == "cpus" || r.name() == "mem";
+      });
+
+    Resources taskResources = cpusMem + volume;
+
+    // Create a task confirming that the directory `path` is empty.
+    // Note that we do not explicitly confirm that `path` exists here.
+    TaskInfo task = createTask(
+        offer.slave_id(),
+        taskResources,
+        "! (ls -Av path | grep -q .)");
+
+    // We expect three status updates for the task.
+    Future<TaskStatus> status0, status1, status2;
+    EXPECT_CALL(sched, statusUpdate(&driver, _))
+      .WillOnce(FutureArg<1>(&status0))
+      .WillOnce(FutureArg<1>(&status1))
+      .WillOnce(FutureArg<1>(&status2));
+
+    // Accept the offer.
+    driver.acceptOffers(
+        {offer.id()},
+        {RESERVE(reservedDisk), CREATE(volume), LAUNCH({task})});
+
+    AWAIT_READY(status0);
+
+    EXPECT_EQ(task.task_id(), status0->task_id());
+    EXPECT_EQ(TASK_STARTING, status0->state());
+
+    AWAIT_READY(status1);
+
+    EXPECT_EQ(task.task_id(), status1->task_id());
+    EXPECT_EQ(TASK_RUNNING, status1->state());
+
+    AWAIT_READY(status2);
+
+    EXPECT_EQ(task.task_id(), status2->task_id());
+    EXPECT_EQ(TASK_FINISHED, status2->state())
+      << "Task for role '" << role << "' and id '" << id << "' did not succeed";
+
+    driver.stop();
+    driver.join();
+  };
+
+  // Helper function to destroy a volume with given role and id.
+  auto destroyVolume = [&slaveId, &master, &PATH, DISK_SIZE](
+      const string& role, const string& id) {
+    Resource volume = createPersistentVolume(
+        DISK_SIZE,
+        role,
+        id,
+        PATH,
+        DEFAULT_CREDENTIAL.principal(),
+        None(),
+        DEFAULT_CREDENTIAL.principal());
+
+    v1::master::Call destroyVolumesCall;
+    destroyVolumesCall.set_type(v1::master::Call::DESTROY_VOLUMES);
+
+    v1::master::Call::DestroyVolumes* destroyVolumes =
+      destroyVolumesCall.mutable_destroy_volumes();
+    destroyVolumes->add_volumes()->CopyFrom(evolve(volume));
+    destroyVolumes->mutable_agent_id()->CopyFrom(evolve(slaveId));
+
+    constexpr ContentType CONTENT_TYPE = ContentType::PROTOBUF;
+
+    Headers headers = createBasicAuthHeaders(DEFAULT_CREDENTIAL);
+    headers["Accept"] = stringify(CONTENT_TYPE);
+
+    return process::http::post(
+        master.get()->pid,
+        "api/v1",
+        headers,
+        serialize(CONTENT_TYPE, destroyVolumesCall),
+        stringify(CONTENT_TYPE));
+  };
+
+  // Run two tasks. In the naive storage scheme of volumes from hierarchical
+  // role frameworks, the first volume would be created under paths
+  // `a/b/c/d/id/` and the second one under `a/b/c/d/`. The second task would in
+  // that case incorrectly see a directory `id` in its persistent volume.
+  runTask("a/b/c/d", "id");
+  runTask("a/b/c", "d");
+
+  // Destroy both volumes. Even though the role `a/b/c` is a prefix of the role
+  // `a/b/c/d`, destroying the former role's volume `d` should not interfere
+  // with the latter's volume `id`.
+  AWAIT_EXPECT_RESPONSE_STATUS_EQ(
+      Accepted().status, destroyVolume("a/b/c", "d"));
+
+  AWAIT_EXPECT_RESPONSE_STATUS_EQ(
+      Accepted().status, destroyVolume("a/b/c/d", "id"));
 }
 
 }  // namespace tests {

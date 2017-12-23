@@ -31,22 +31,6 @@ namespace mesos {
 namespace internal {
 namespace slave {
 
-ContainerID getRootContainerId(const ContainerID& containerId)
-{
-  ContainerID rootContainerId = containerId;
-  while (rootContainerId.has_parent()) {
-    // NOTE: Looks like protobuf does not handle copying well when
-    // nesting message is involved, because the source and the target
-    // point to the same object. Therefore, we create a temporary
-    // variable and use an extra copy here.
-    ContainerID id = rootContainerId.parent();
-    rootContainerId = id;
-  }
-
-  return rootContainerId;
-}
-
-
 #ifdef __linux__
 // This function can be used to find a new target `pid` for entering
 // the `mnt` namespace of a container (if necessary).
@@ -74,24 +58,31 @@ ContainerID getRootContainerId(const ContainerID& containerId)
 // tasks with the default (a.k.a. "pod" executor).
 Try<pid_t> getMountNamespaceTarget(pid_t parent)
 {
-  Try<ino_t> parentNamespace = ns::getns(parent, "mnt");
+  Result<ino_t> parentNamespace = ns::getns(parent, "mnt");
   if (parentNamespace.isError()) {
-    return Error("Cannot get 'mnt' namespace for"
-                 " process '" + stringify(parent) + "'");
+    return Error("Cannot get 'mnt' namespace for process"
+                 " '" + stringify(parent) + "': " + parentNamespace.error());
+  } else if (parentNamespace.isNone()) {
+    return Error("Cannot get 'mnt' namespace for non-existing process"
+                 " '" + stringify(parent) + "'");
   }
 
   // Search for a new mount namespace in all direct children.
   Try<set<pid_t>> children = os::children(parent, false);
   if (children.isError()) {
     return Error("Cannot get children for process"
-                 " '" + stringify(parent) + "'");
+                 " '" + stringify(parent) + "': " + children.error());
   }
 
   foreach (pid_t child, children.get()) {
-    Try<ino_t> childNamespace = ns::getns(child, "mnt");
+    Result<ino_t> childNamespace = ns::getns(child, "mnt");
     if (childNamespace.isError()) {
-      return Error("Cannot get 'mnt' namespace for"
-                   " child process '" + stringify(child) + "'");
+      return Error("Cannot get 'mnt' namespace for child process"
+                   " '" + stringify(child) + "': " + childNamespace.error());
+    } else if (childNamespace.isNone()) {
+      VLOG(1) << "Cannot get 'mnt' namespace for non-existing child process"
+                 " '" + stringify(child) + "'";
+      continue;
     }
 
     if (parentNamespace.get() != childNamespace.get()) {
@@ -105,14 +96,19 @@ Try<pid_t> getMountNamespaceTarget(pid_t parent)
     if (children2.isError()) {
       return Error("Cannot get 2nd-level children for process"
                    " '" + stringify(parent) + "' with child"
-                   " '" + stringify(child) + "'");
+                   " '" + stringify(child) + "': " + children2.error());
     }
 
     foreach (pid_t child2, children2.get()) {
-      Try<ino_t> child2Namespace = ns::getns(child2, "mnt");
+      Result<ino_t> child2Namespace = ns::getns(child2, "mnt");
       if (child2Namespace.isError()) {
-        return Error("Cannot get 'mnt' namespace for 2nd-level"
-                     " child process '" + stringify(child2) + "'");
+        return Error("Cannot get 'mnt' namespace for 2nd-level child process"
+                     " '" + stringify(child2) +
+                     "': " + child2Namespace.error());
+      } else if (child2Namespace.isNone()) {
+        VLOG(1) << "Cannot get 'mnt' namespace for non-existing 2nd-level"
+                   " child process '" + stringify(child2) + "'";
+        continue;
       }
 
       if (parentNamespace.get() != child2Namespace.get()) {

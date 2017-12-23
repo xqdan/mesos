@@ -19,8 +19,11 @@
 
 #include <list>
 #include <string>
+#include <vector>
 
 #include <gmock/gmock.h>
+
+#include <mesos/authentication/secret_generator.hpp>
 
 #include <mesos/master/detector.hpp>
 
@@ -46,24 +49,6 @@ using ::testing::Return;
 namespace mesos {
 namespace internal {
 namespace tests {
-
-class MockGarbageCollector : public slave::GarbageCollector
-{
-public:
-  MockGarbageCollector();
-  virtual ~MockGarbageCollector();
-
-  MOCK_METHOD2(
-      schedule,
-      process::Future<Nothing>(const Duration& d, const std::string& path));
-  MOCK_METHOD1(
-      unschedule,
-      process::Future<bool>(const std::string& path));
-  MOCK_METHOD1(
-      prune,
-      void(const Duration& d));
-};
-
 
 class MockResourceEstimator : public mesos::slave::ResourceEstimator
 {
@@ -104,53 +89,63 @@ class MockSlave : public slave::Slave
 {
 public:
   MockSlave(
+      const std::string& id,
       const slave::Flags& flags,
       mesos::master::detector::MasterDetector* detector,
       slave::Containerizer* containerizer,
-      const Option<mesos::slave::QoSController*>& qosController = None(),
-      const Option<mesos::Authorizer*>& authorizer = None());
+      Files* files,
+      slave::GarbageCollector* gc,
+      slave::TaskStatusUpdateManager* taskStatusUpdateManager,
+      mesos::slave::ResourceEstimator* resourceEstimator,
+      mesos::slave::QoSController* qosController,
+      SecretGenerator* secretGenerator,
+      const Option<Authorizer*>& authorizer);
 
-  virtual ~MockSlave();
-
-  MOCK_METHOD5(runTask, void(
+  MOCK_METHOD6(runTask, void(
       const process::UPID& from,
       const FrameworkInfo& frameworkInfo,
       const FrameworkID& frameworkId,
       const process::UPID& pid,
-      const TaskInfo& task));
+      const TaskInfo& task,
+      const std::vector<ResourceVersionUUID>& resourceVersionUuids));
 
   void unmocked_runTask(
       const process::UPID& from,
       const FrameworkInfo& frameworkInfo,
       const FrameworkID& frameworkId,
       const process::UPID& pid,
-      const TaskInfo& task);
+      const TaskInfo& task,
+      const std::vector<ResourceVersionUUID>& resourceVersionUuids);
 
-  MOCK_METHOD5(_run, void(
-      const process::Future<bool>& future,
+  MOCK_METHOD6(_run, void(
+      const process::Future<std::list<bool>>& unschedules,
       const FrameworkInfo& frameworkInfo,
       const ExecutorInfo& executorInfo,
       const Option<TaskInfo>& task,
-      const Option<TaskGroupInfo>& taskGroup));
+      const Option<TaskGroupInfo>& taskGroup,
+      const std::vector<ResourceVersionUUID>& resourceVersionUuids));
 
   void unmocked__run(
-      const process::Future<bool>& future,
+      const process::Future<std::list<bool>>& unschedules,
       const FrameworkInfo& frameworkInfo,
       const ExecutorInfo& executorInfo,
       const Option<TaskInfo>& task,
-      const Option<TaskGroupInfo>& taskGroup);
+      const Option<TaskGroupInfo>& taskGroup,
+      const std::vector<ResourceVersionUUID>& resourceVersionUuids);
 
-  MOCK_METHOD4(runTaskGroup, void(
+  MOCK_METHOD5(runTaskGroup, void(
       const process::UPID& from,
       const FrameworkInfo& frameworkInfo,
       const ExecutorInfo& executorInfo,
-      const TaskGroupInfo& taskGroup));
+      const TaskGroupInfo& taskGroup,
+      const std::vector<ResourceVersionUUID>& resourceVersionUuids));
 
   void unmocked_runTaskGroup(
       const process::UPID& from,
       const FrameworkInfo& frameworkInfo,
       const ExecutorInfo& executorInfo,
-      const TaskGroupInfo& taskGroup);
+      const TaskGroupInfo& taskGroup,
+      const std::vector<ResourceVersionUUID>& resourceVersionUuids);
 
   MOCK_METHOD2(killTask, void(
       const process::UPID& from,
@@ -190,12 +185,21 @@ public:
       const process::Future<Option<
           mesos::slave::ContainerTermination>>& termination));
 
-private:
-  Files files;
-  MockGarbageCollector gc;
-  MockResourceEstimator resourceEstimator;
-  MockQoSController qosController;
-  slave::StatusUpdateManager* statusUpdateManager;
+  void unmocked_executorTerminated(
+      const FrameworkID& frameworkId,
+      const ExecutorID& executorId,
+      const process::Future<Option<
+          mesos::slave::ContainerTermination>>& termination);
+
+  MOCK_METHOD3(shutdownExecutor, void(
+      const process::UPID& from,
+      const FrameworkID& frameworkId,
+      const ExecutorID& executorId));
+
+  void unmocked_shutdownExecutor(
+      const process::UPID& from,
+      const FrameworkID& frameworkId,
+      const ExecutorID& executorId);
 };
 
 } // namespace tests {

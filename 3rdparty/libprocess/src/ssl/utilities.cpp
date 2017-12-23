@@ -13,9 +13,13 @@
 #include <process/ssl/utilities.hpp>
 
 #include <openssl/err.h>
+#include <openssl/evp.h>
+#include <openssl/hmac.h>
 #include <openssl/rsa.h>
 #include <openssl/x509.h>
 #include <openssl/x509v3.h>
+
+#include <string>
 
 #include <stout/check.hpp>
 #include <stout/net.hpp>
@@ -244,6 +248,12 @@ Try<X509*> generate_x509(
       return Error("Failed to get IP/4 address");
     }
 
+#ifdef __WINDOWS__
+    // cURL defines `in_addr_t` as `unsigned long` for Windows,
+    // so we do too for consistency.
+    typedef unsigned long in_addr_t;
+#endif // __WINDOWS__
+
     // For `iPAddress` we hand over a binary value as part of the
     // specification.
     if (ASN1_STRING_set(
@@ -334,6 +344,32 @@ Try<Nothing> write_certificate_file(X509* x509, const Path& path)
   fclose(file);
 
   return Nothing();
+}
+
+
+Try<std::string> generate_hmac_sha256(
+  const std::string& message,
+  const std::string& key)
+{
+  unsigned int md_len = 0;
+
+  unsigned char* rc = HMAC(
+      EVP_sha256(),
+      key.data(),
+      key.size(),
+      reinterpret_cast<const unsigned char*>(message.data()),
+      message.size(),
+      nullptr,
+      &md_len);
+
+  if (rc == nullptr) {
+    const char* reason = ERR_reason_error_string(ERR_get_error());
+
+    return Error(
+        "HMAC failed" + (reason == nullptr ? "" : ": " + std::string(reason)));
+  }
+
+  return std::string(reinterpret_cast<char*>(rc), md_len);
 }
 
 } // namespace openssl {

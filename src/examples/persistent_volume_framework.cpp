@@ -29,6 +29,7 @@
 #include <mesos/authorizer/acls.hpp>
 
 #include <stout/flags.hpp>
+#include <stout/hashset.hpp>
 #include <stout/json.hpp>
 #include <stout/option.hpp>
 #include <stout/os.hpp>
@@ -51,12 +52,19 @@ using std::ostringstream;
 using std::string;
 using std::vector;
 
+constexpr char FRAMEWORK_NAME[] = "Persistent Volume Framework (C++)";
+
 
 // TODO(jieyu): Currently, persistent volume is only allowed for
 // reserved resources.
 static Resources SHARD_INITIAL_RESOURCES(const string& role)
 {
-  return Resources::parse("cpus:0.1;mem:32;disk:16", role).get();
+  Resources allocation =
+    Resources::parse("cpus:0.1;mem:32;disk:16", role).get();
+
+  allocation.allocate(role);
+
+  return allocation;
 }
 
 
@@ -64,7 +72,8 @@ static Resource SHARD_PERSISTENT_VOLUME(
     const string& role,
     const string& persistenceId,
     const string& containerPath,
-    const string& principal)
+    const string& principal,
+    bool isShared)
 {
   Volume volume;
   volume.set_container_path(containerPath);
@@ -77,6 +86,11 @@ static Resource SHARD_PERSISTENT_VOLUME(
 
   Resource resource = Resources::parse("disk", "8", role).get();
   resource.mutable_disk()->CopyFrom(info);
+  resource.mutable_allocation_info()->set_role(role);
+
+  if (isShared) {
+    resource.mutable_shared();
+  }
 
   return resource;
 }
@@ -87,6 +101,15 @@ static Offer::Operation CREATE(const Resources& volumes)
   Offer::Operation operation;
   operation.set_type(Offer::Operation::CREATE);
   operation.mutable_create()->mutable_volumes()->CopyFrom(volumes);
+  return operation;
+}
+
+
+static Offer::Operation DESTROY(const Resources& volumes)
+{
+  Offer::Operation operation;
+  operation.set_type(Offer::Operation::DESTROY);
+  operation.mutable_destroy()->mutable_volumes()->CopyFrom(volumes);
   return operation;
 }
 
@@ -104,24 +127,42 @@ static Offer::Operation LAUNCH(const vector<TaskInfo>& tasks)
 }
 
 
-// The framework launches a task on each registered slave using a
-// persistent volume. It restarts the task once the previous one on
-// the slave finishes. The framework terminates once the number of
-// tasks launched on each slave reaches a limit.
+// The framework launches a task on each registered agent using a
+// (possibly shared) persistent volume. In the case of regular
+// persistent volumes, the next task is started once the previous
+// one terminates; and in the case of shared persistent volumes,
+// tasks can use the same shared volume simultaneously. The
+// framework terminates once the number of tasks launched on each
+// agent reaches a limit.
 class PersistentVolumeScheduler : public Scheduler
 {
 public:
   PersistentVolumeScheduler(
       const FrameworkInfo& _frameworkInfo,
       size_t numShards,
+      size_t numSharedShards,
       size_t tasksPerShard)
-    : frameworkInfo(_frameworkInfo)
+    : frameworkInfo(_frameworkInfo),
+      role(_frameworkInfo.roles(0))
   {
+    // Initialize the shards using regular persistent volume.
     for (size_t i = 0; i < numShards; i++) {
-      shards.push_back(Shard(
-          "shard-" + stringify(i),
-          frameworkInfo.role(),
-          tasksPerShard));
+      shards.push_back(
+          Shard(
+              "shard-" + stringify(i),
+              role,
+              tasksPerShard,
+              false));
+    }
+
+    // Initialize the shards using shared persistent volume.
+    for (size_t i = 0; i < numSharedShards; i++) {
+      shards.push_back(
+          Shard(
+              "shared-shard-" + stringify(i),
+              role,
+              tasksPerShard,
+              true));
     }
   }
 
@@ -143,8 +184,7 @@ public:
     LOG(INFO) << "Reregistered with master " << masterInfo;
   }
 
-  virtual void disconnected(
-      SchedulerDriver* driver)
+  virtual void disconnected(SchedulerDriver* driver)
   {
     LOG(INFO) << "Disconnected!";
   }
@@ -166,66 +206,121 @@ public:
       foreach (Shard& shard, shards) {
         switch (shard.state) {
           case Shard::INIT:
+            CHECK_EQ(0u, shard.launched);
+
             if (offered.contains(shard.resources)) {
               Resource volume = SHARD_PERSISTENT_VOLUME(
-                  frameworkInfo.role(),
-                  UUID::random().toString(),
+                  role,
+                  id::UUID::random().toString(),
                   "volume",
-                  frameworkInfo.principal());
+                  frameworkInfo.principal(),
+                  shard.volume.isShared);
 
               Try<Resources> resources = shard.resources.apply(CREATE(volume));
               CHECK_SOME(resources);
 
               TaskInfo task;
               task.set_name(shard.name);
-              task.mutable_task_id()->set_value(UUID::random().toString());
+              task.mutable_task_id()->set_value(id::UUID::random().toString());
               task.mutable_slave_id()->CopyFrom(offer.slave_id());
               task.mutable_resources()->CopyFrom(resources.get());
-              task.mutable_command()->set_value("touch volume/persisted");
+
+              // TODO(anindya_sinha): Add a flag to allow specifying a
+              // custom write command for the consumer task.
+              task.mutable_command()->set_value(
+                  "echo hello > volume/persisted");
 
               // Update the shard.
               shard.state = Shard::STAGING;
-              shard.taskId = task.task_id();
-              shard.volume.id = volume.disk().persistence().id();
-              shard.volume.slave = offer.slave_id().value();
+              shard.taskIds.insert(task.task_id());
               shard.resources = resources.get();
+              shard.volume.resource = volume;
               shard.launched++;
 
               operations.push_back(CREATE(volume));
               operations.push_back(LAUNCH({task}));
 
-              resources = offered.apply(vector<Offer::Operation>{
-                  CREATE(volume),
-                  LAUNCH({task})});
+              resources = offered.apply(
+                  vector<Offer::Operation>{CREATE(volume)});
 
               CHECK_SOME(resources);
               offered = resources.get();
             }
+
             break;
-          case Shard::WAITING:
+
+          case Shard::STAGING:
+            CHECK_LE(shard.launched, shard.tasks);
+
+            if (shard.launched == shard.tasks) {
+              LOG(INFO) << "All tasks launched, but one or more yet to run";
+              break;
+            }
+
             if (offered.contains(shard.resources)) {
-              CHECK_EQ(shard.volume.slave, offer.slave_id().value());
+              // Set mode to RO for persistent volume resource since we are
+              // just reading from the persistent volume.
+              CHECK_SOME(shard.volume.resource);
+
+              Resource volume = shard.volume.resource.get();
+              Resources taskResources = shard.resources - volume;
+              volume.mutable_disk()->mutable_volume()->set_mode(Volume::RO);
+              taskResources += volume;
 
               TaskInfo task;
               task.set_name(shard.name);
-              task.mutable_task_id()->set_value(UUID::random().toString());
+              task.mutable_task_id()->set_value(id::UUID::random().toString());
               task.mutable_slave_id()->CopyFrom(offer.slave_id());
-              task.mutable_resources()->CopyFrom(shard.resources);
-              task.mutable_command()->set_value("test -f volume/persisted");
+              task.mutable_resources()->CopyFrom(taskResources);
+
+              // The read task tries to access the content written in the
+              // persistent volume for up to 15 seconds. This is to handle
+              // the scenario where the writer task may not have done the
+              // write to the volume even though it was launched earlier.
+              // TODO(anindya_sinha): Add a flag to allow specifying a
+              // custom read command for the consumer task.
+              task.mutable_command()->set_value(R"~(
+                  COUNTER=0
+                  while [ $COUNTER -lt 15 ]; do
+                    cat volume/persisted
+                    if [ $? -eq 0 ]; then
+                      exit 0
+                    fi
+                    ((COUNTER++))
+                    sleep 1
+                  done
+                  exit 1
+                  )~");
 
               // Update the shard.
-              shard.state = Shard::STAGING;
-              shard.taskId = task.task_id();
+              shard.taskIds.insert(task.task_id());
               shard.launched++;
 
+              // Launch the next instance of this task with the already
+              // created volume.
               operations.push_back(LAUNCH({task}));
             }
+
             break;
-          case Shard::STAGING:
+
+          case Shard::TERMINATING:
+            CHECK_EQ(shard.terminated, shard.launched);
+            CHECK_SOME(shard.volume.resource);
+
+            // Send (or resend) DESTROY of the volume here.
+            if (offered.contains(shard.volume.resource.get())) {
+              operations.push_back(DESTROY(shard.volume.resource.get()));
+            } else {
+              shard.state = Shard::DONE;
+            }
+
+            break;
+
           case Shard::RUNNING:
           case Shard::DONE:
             // Ignore the offer.
             break;
+
           default:
             LOG(ERROR) << "Unexpected shard state: " << shard.state;
             driver->abort();
@@ -233,35 +328,50 @@ public:
         }
       }
 
+      // Check the terminal condition.
+      bool terminal = true;
+      foreach (const Shard& shard, shards) {
+        if (shard.state != Shard::DONE) {
+          terminal = false;
+          break;
+        }
+      }
+
+      if (terminal) {
+        driver->stop();
+      }
+
       driver->acceptOffers({offer.id()}, operations);
     }
   }
 
-  virtual void offerRescinded(
-      SchedulerDriver* driver,
-      const OfferID& offerId)
+  virtual void offerRescinded(SchedulerDriver* driver, const OfferID& offerId)
   {
     LOG(INFO) << "Offer " << offerId << " has been rescinded";
   }
 
-  virtual void statusUpdate(
-      SchedulerDriver* driver,
-      const TaskStatus& status)
+  virtual void statusUpdate(SchedulerDriver* driver, const TaskStatus& status)
   {
     LOG(INFO) << "Task '" << status.task_id() << "' is in state "
               << status.state();
 
     foreach (Shard& shard, shards) {
-      if (shard.taskId == status.task_id()) {
+      if (shard.taskIds.contains(status.task_id())) {
         switch (status.state()) {
           case TASK_RUNNING:
-            shard.state = Shard::RUNNING;
+            CHECK(shard.launched <= shard.tasks);
+            if (shard.launched == shard.tasks &&
+                shard.state == Shard::STAGING) {
+              shard.state = Shard::RUNNING;
+            }
             break;
           case TASK_FINISHED:
-            if (shard.launched >= shard.tasks) {
-              shard.state = Shard::DONE;
-            } else {
-              shard.state = Shard::WAITING;
+            ++shard.terminated;
+
+            CHECK(shard.terminated <= shard.tasks);
+            if (shard.terminated == shard.tasks &&
+                shard.state == Shard::RUNNING) {
+              shard.state = Shard::TERMINATING;
             }
             break;
           case TASK_STAGING:
@@ -278,19 +388,6 @@ public:
         break;
       }
     }
-
-    // Check the terminal condition.
-    bool terminal = true;
-    foreach (const Shard& shard, shards) {
-      if (shard.state != Shard::DONE) {
-        terminal = false;
-        break;
-      }
-    }
-
-    if (terminal) {
-      driver->stop();
-    }
   }
 
   virtual void frameworkMessage(
@@ -303,9 +400,7 @@ public:
               << "' on agent " << slaveId << ": '" << data << "'";
   }
 
-  virtual void slaveLost(
-      SchedulerDriver* driver,
-      const SlaveID& slaveId)
+  virtual void slaveLost(SchedulerDriver* driver, const SlaveID& slaveId)
   {
     LOG(INFO) << "Lost agent " << slaveId;
   }
@@ -320,9 +415,7 @@ public:
               << slaveId << ", " << WSTRINGIFY(status);
   }
 
-  virtual void error(
-      SchedulerDriver* driver,
-      const string& message)
+  virtual void error(SchedulerDriver* driver, const string& message)
   {
     LOG(ERROR) << message;
   }
@@ -330,48 +423,69 @@ public:
 private:
   struct Shard
   {
+    // States that the state machine for each shard goes through.
+    //
+    // The state machine per shard runs as follows:
+    // 1. The shard is STAGING when it launches a writer task that writes
+    //    to the persistent volume.
+    // 2. The shard launches one or more reader tasks that read the same file
+    //    from the persistent volume to confirm the write operation. Once all
+    //    tasks are launched, the shard is RUNNING.
+    // 3. When all tasks finish, the shard starts TERMINATING by destroying
+    //    the persistent volume.
+    // 4. Once the persistent volume is successfully destroyed, the shard
+    //    is DONE and terminates.
+    //
+    // In the case of regular persistent volumes, the tasks run in sequence;
+    // whereas in the case of shared persistent volumes, the tasks run in
+    // parallel.
     enum State
     {
-      INIT = 0,   // The shard hasn't been launched yet.
-      STAGING,    // The shard has been launched.
-      RUNNING,    // The shard is running.
-      WAITING,    // The shard is waiting to be re-launched.
-      DONE,       // The shard has finished all tasks.
-
-      // TODO(jieyu): Add another state so that we can track the
-      // destroy of the volume once all tasks finish.
+      INIT = 0,    // The shard is in initialized state.
+      STAGING,     // The shard is awaiting offers to launch more tasks.
+      RUNNING,     // The shard is running (i.e., all tasks have
+                   // successfully launched).
+      TERMINATING, // All tasks are finished and needs cleanup.
+      DONE,        // The shard has finished cleaning up.
     };
 
     // The persistent volume associated with this shard.
     struct Volume
     {
-      // The persistence ID.
-      string id;
+      explicit Volume(bool _isShared) : isShared(_isShared) {}
 
-      // An identifier used to uniquely identify a slave (even across
-      // reboot). In the test, we use the slave ID since slaves will not
-      // be rebooted. Note that we cannot use hostname as the identifier
-      // in a local cluster because all slaves share the same hostname.
-      string slave;
+      // `Resource` object for this volume.
+      Option<Resource> resource;
+
+      // Flag to indicate if this is a regular or shared persistent volume.
+      bool isShared;
     };
 
-    Shard(const string& _name, const string& role, size_t _tasks)
+    Shard(
+        const string& _name,
+        const string& role,
+        size_t _tasks,
+        bool isShared)
       : name(_name),
         state(INIT),
+        volume(isShared),
         resources(SHARD_INITIAL_RESOURCES(role)),
         launched(0),
+        terminated(0),
         tasks(_tasks) {}
 
     string name;
-    State state;          // The current state of this shard.
-    TaskID taskId;        // The ID of the current task.
-    Volume volume;        // The persistent volume associated with the shard.
-    Resources resources;  // Resources required to launch the shard.
-    size_t launched;      // How many tasks this shard has launched.
-    size_t tasks;         // How many tasks this shard should launch.
+    State state;             // The current state of this shard.
+    hashset<TaskID> taskIds; // The IDs of the tasks running on this shard.
+    Volume volume;           // The persistent volume associated with the shard.
+    Resources resources;     // Resources required to launch the shard.
+    size_t launched;         // How many tasks this shard has launched.
+    size_t terminated;       // How many tasks this shard has terminated.
+    size_t tasks;            // How many tasks this shard should launch.
   };
 
   FrameworkInfo frameworkInfo;
+  const string role;
   vector<Shard> shards;
 };
 
@@ -401,8 +515,13 @@ public:
 
     add(&Flags::num_shards,
         "num_shards",
-        "The number of shards the framework will run.",
-        3);
+        "The number of shards the framework will run using regular volume.",
+        2);
+
+    add(&Flags::num_shared_shards,
+        "num_shared_shards",
+        "The number of shards the framework will run using shared volume.",
+        2);
 
     add(&Flags::tasks_per_shard,
         "tasks_per_shard",
@@ -414,6 +533,7 @@ public:
   string role;
   string principal;
   size_t num_shards;
+  size_t num_shared_shards;
   size_t tasks_per_shard;
 };
 
@@ -421,17 +541,16 @@ public:
 int main(int argc, char** argv)
 {
   Flags flags;
-
   Try<flags::Warnings> load = flags.load("MESOS_", argc, argv);
-
-  if (load.isError()) {
-    cerr << flags.usage(load.error()) << endl;
-    return EXIT_FAILURE;
-  }
 
   if (flags.help) {
     cout << flags.usage() << endl;
     return EXIT_SUCCESS;
+  }
+
+  if (load.isError()) {
+    cerr << flags.usage(load.error()) << endl;
+    return EXIT_FAILURE;
   }
 
   if (flags.master.isNone()) {
@@ -439,7 +558,7 @@ int main(int argc, char** argv)
     return EXIT_FAILURE;
   }
 
-  logging::initialize(argv[0], flags, true); // Catch signals.
+  logging::initialize(argv[0], true, flags); // Catch signals.
 
   // Log any flag warnings (after logging is initialized).
   foreach (const flags::Warning& warning, load->warnings) {
@@ -448,10 +567,16 @@ int main(int argc, char** argv)
 
   FrameworkInfo framework;
   framework.set_user(""); // Have Mesos fill in the current user.
-  framework.set_name("Persistent Volume Framework (C++)");
-  framework.set_role(flags.role);
+  framework.set_name(FRAMEWORK_NAME);
+  framework.add_roles(flags.role);
+  framework.add_capabilities()->set_type(
+      FrameworkInfo::Capability::MULTI_ROLE);
   framework.set_checkpoint(true);
   framework.set_principal(flags.principal);
+  framework.add_capabilities()->set_type(
+      FrameworkInfo::Capability::SHARED_RESOURCES);
+  framework.add_capabilities()->set_type(
+      FrameworkInfo::Capability::RESERVATION_REFINEMENT);
 
   if (flags.master.get() == "local") {
     // Configure master.
@@ -465,13 +590,14 @@ int main(int argc, char** argv)
 
     os::setenv("MESOS_ACLS", stringify(JSON::protobuf(acls)));
 
-    // Configure slave.
+    // Configure agent.
     os::setenv("MESOS_DEFAULT_ROLE", flags.role);
   }
 
   PersistentVolumeScheduler scheduler(
       framework,
       flags.num_shards,
+      flags.num_shared_shards,
       flags.tasks_per_shard);
 
   MesosSchedulerDriver* driver = new MesosSchedulerDriver(

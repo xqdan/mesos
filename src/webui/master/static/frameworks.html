@@ -13,7 +13,7 @@
       <th data-key="hostname">Host</th>
       <th data-key="user">User</th>
       <th data-key="name">Name</th>
-      <th data-key="role">Role</th>
+      <th data-key="roles">Roles</th>
       <th data-key="principal">Principal</th>
       <th data-key="tasks.length">Active Tasks</th>
       <th data-key="used_resources.cpus">CPUs</th>
@@ -29,13 +29,14 @@
     <tr ng-repeat="framework in $data  | filter: { active: true }">
       <td>
         <a href="{{'#/frameworks/' + framework.id}}">
-          {{(framework.id | truncateMesosID) || framework.name}}</a>
+          {{framework.id | truncateMesosID}}
+        </a>
         <button class="btn btn-xs btn-toggle btn-default"
-          clipboard
-          data-clipboard-text="{{framework.id}}"
-          tooltip="Copy ID"
-          tooltip-placement="right"
-          tooltip-trigger="clipboardhover">
+                clipboard
+                data-clipboard-text="{{framework.id}}"
+                tooltip="Copy ID"
+                tooltip-placement="right"
+                tooltip-trigger="clipboardhover">
         </button>
       </td>
       <td ng-switch="!!framework.webui_url">
@@ -44,7 +45,11 @@
       </td>
       <td>{{framework.user}}</td>
       <td>{{framework.name}}</td>
-      <td>{{framework.role}}</td>
+      <!-- TODO(bmahler): This doesn't display well when there are a lot
+           of roles (e.g. a large organization with a lot of teams &
+           services, using roles like /engineering/frontend/webserver, etc).
+           Figure out a way to display this without bloating the table. -->
+      <td>{{framework.roles.toString()}}</td>
       <td>{{framework.principal}}</td>
       <td>{{framework.tasks.length}}</td>
       <td>{{framework.used_resources.cpus | number}}</td>
@@ -71,7 +76,7 @@
     <th data-key="hostname">Host</th>
     <th data-key="user">User</th>
     <th data-key="name">Name</th>
-    <th data-key="role">Role</th>
+    <th data-key="roles">Roles</th>
     <th data-key="principal">Principal</th>
     <th data-key="tasks.length">Active Tasks</th>
     <th data-key="used_resources.cpus">CPUs</th>
@@ -87,7 +92,8 @@
   <tr ng-repeat="framework in $data  | filter: { active: false }">
     <td>
       <a href="{{'#/frameworks/' + framework.id}}">
-        {{(framework.id | truncateMesosID) || framework.name}}</a>
+        {{framework.id | truncateMesosID}}
+      </a>
       <button class="btn btn-xs btn-toggle btn-default"
               clipboard
               data-clipboard-text="{{framework.id}}"
@@ -102,7 +108,11 @@
     </td>
     <td>{{framework.user}}</td>
     <td>{{framework.name}}</td>
-    <td>{{framework.role}}</td>
+    <!-- TODO(bmahler): This doesn't display well when there are a lot
+         of roles (e.g. a large organization with a lot of teams &
+         services, using roles like /engineering/frontend/webserver, etc).
+         Figure out a way to display this without bloating the table. -->
+    <td>{{framework.roles.toString()}}</td>
     <td>{{framework.principal}}</td>
     <td>{{framework.tasks.length}}</td>
     <td>{{framework.used_resources.cpus | number}}</td>
@@ -129,7 +139,7 @@
       <th data-key="hostname">Host</th>
       <th data-key="user">User</th>
       <th data-key="name">Name</th>
-      <th data-key="role">Role</th>
+      <th data-key="roles">Roles</th>
       <th data-key="principal">Principal</th>
       <th data-key="registered_time">Registered</th>
       <th data-key="unregistered_time">Unregistered</th>
@@ -139,19 +149,24 @@
     <tr ng-repeat="framework in $data">
       <td>
         <a href="{{'#/frameworks/' + framework.id}}" title="{{framework.id}}">
-          {{framework.id | truncateMesosID}}</a>
+          {{framework.id | truncateMesosID}}
+        </a>
         <button class="btn btn-xs btn-toggle btn-default"
-          clipboard
-          data-clipboard-text="{{framework.id}}"
-          tooltip="Copy ID"
-          tooltip-placement="right"
-          tooltip-trigger="clipboardhover">
+                clipboard
+                data-clipboard-text="{{framework.id}}"
+                tooltip="Copy ID"
+                tooltip-placement="right"
+                tooltip-trigger="clipboardhover">
         </button>
       </td>
       <td>{{framework.hostname}}</td>
       <td>{{framework.user}}</td>
       <td>{{framework.name}}</td>
-      <td>{{framework.role}}</td>
+      <!-- TODO(bmahler): This doesn't display well when there are a lot
+           of roles (e.g. a large organization with a lot of teams &
+           services, using roles like /engineering/frontend/webserver, etc).
+           Figure out a way to display this without bloating the table. -->
+      <td>{{framework.roles.toString()}}</td>
       <td>{{framework.principal}}</td>
       <td>
         <m-timestamp value="{{framework.registered_time * 1000}}"></m-timestamp>

@@ -2,6 +2,34 @@
  * BOOTSTRAP OVERRIDES
  */
 
+.navbar {
+  border: 0;
+}
+
+.navbar.navbar-inverse {
+  background-color: #2A6496;
+  color: #FFF;
+}
+
+.navbar .navbar-nav > li > a {
+  color: inherit;
+}
+
+.navbar .navbar-nav > .active > a,
+.navbar .navbar-nav > .active > a:focus,
+.navbar .navbar-nav > .active > a:hover {
+    color: inherit;
+    background-color: rgba(255,255,255,.1);
+}
+
+.navbar-brand {
+  padding: 0px 5px;
+}
+
+.navbar-brand > img {
+  height: 100%;
+}
+
 .table thead th {
   vertical-align: top;
 }
@@ -21,16 +49,6 @@
 body {
   /* Add space for fixed position navbar. */
   padding-top: 60px;
-}
-
-@media (max-width: 979px) {
-  body {
-    /* Mobile devices 979px and narrower use a statically positioned navbar */
-    /* and therefore need no padding for the <body>. */
-    /* */
-    /* @see http://twitter.github.io/bootstrap/scaffolding.html#responsive */
-    padding-top: 0;
-  }
 }
 
 dl.inline dt, dl.inline dd {
@@ -83,20 +101,14 @@ time:hover {
   visibility: hidden;
 }
 
-.inline .zeroclipboard-is-hover,
-.table-condensed .zeroclipboard-is-hover,
-.flash dd:hover .btn-toggle,
-.flash td:hover .btn-toggle {
+dd:hover .btn-toggle,
+td:hover .btn-toggle {
   visibility: visible;
 }
 
-.zeroclipboard-is-hover {
+.clipboard-is-hover {
   background-color: #e6e6e6;
   background-position: 0 -15px;
-}
-
-.zeroclipboard-is-active {
-  background-image: none;
 }
 
 .badge-type {
@@ -162,4 +174,24 @@ a.badge-type:hover {
 .btn-clear:active {
   -webkit-box-shadow: none;
   box-shadow: none;
+}
+
+/*
+ * The `hidden-text` class hides text by making the font size 0.
+ * This can be used, for example, to insert text that will be
+ * added when the user highlights and copies, while leaving
+ * the text hidden from the user.
+ */
+.hidden-text {
+  font-size: 0;
+}
+
+.task-healthy {
+  color: #27c97b;
+  text-transform: capitalize;
+}
+
+.task-unhealthy {
+  color: #f33745;
+  text-transform: capitalize;
 }

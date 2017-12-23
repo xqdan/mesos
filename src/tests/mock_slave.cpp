@@ -18,6 +18,8 @@
 
 #include <gmock/gmock.h>
 
+#include <mesos/authentication/secret_generator.hpp>
+
 #include <mesos/slave/qos_controller.hpp>
 #include <mesos/slave/resource_estimator.hpp>
 
@@ -27,13 +29,23 @@
 #include <stout/option.hpp>
 
 #include "slave/slave.hpp"
-#include "slave/status_update_manager.hpp"
+#include "slave/task_status_update_manager.hpp"
 
 #include "tests/mock_slave.hpp"
 
 using mesos::master::detector::MasterDetector;
 
+using mesos::internal::slave::Containerizer;
+using mesos::internal::slave::GarbageCollector;
+using mesos::internal::slave::TaskStatusUpdateManager;
+
+using mesos::slave::ContainerTermination;
+using mesos::slave::ResourceEstimator;
+using mesos::slave::QoSController;
+
 using std::list;
+using std::string;
+using std::vector;
 
 using process::Future;
 using process::UPID;
@@ -44,25 +56,6 @@ using testing::Invoke;
 namespace mesos {
 namespace internal {
 namespace tests {
-
-MockGarbageCollector::MockGarbageCollector()
-{
-  // NOTE: We use 'EXPECT_CALL' and 'WillRepeatedly' here instead of
-  // 'ON_CALL' and 'WillByDefault'. See 'TestContainerizer::SetUp()'
-  // for more details.
-  EXPECT_CALL(*this, schedule(_, _))
-    .WillRepeatedly(Return(Nothing()));
-
-  EXPECT_CALL(*this, unschedule(_))
-    .WillRepeatedly(Return(true));
-
-  EXPECT_CALL(*this, prune(_))
-    .WillRepeatedly(Return());
-}
-
-
-MockGarbageCollector::~MockGarbageCollector() {}
-
 
 MockResourceEstimator::MockResourceEstimator()
 {
@@ -100,30 +93,36 @@ MockQoSController::~MockQoSController() {}
 
 
 MockSlave::MockSlave(
+    const string& id,
     const slave::Flags& flags,
     MasterDetector* detector,
-    slave::Containerizer* containerizer,
-    const Option<mesos::slave::QoSController*>& _qosController,
-    const Option<mesos::Authorizer*>& authorizer)
+    Containerizer* containerizer,
+    Files* files,
+    GarbageCollector* gc,
+    TaskStatusUpdateManager* taskStatusUpdateManager,
+    ResourceEstimator* resourceEstimator,
+    QoSController* qosController,
+    SecretGenerator* secretGenerator,
+    const Option<Authorizer*>& authorizer)
   : slave::Slave(
         process::ID::generate("slave"),
         flags,
         detector,
         containerizer,
-        &files,
-        &gc,
-        statusUpdateManager = new slave::StatusUpdateManager(flags),
-        &resourceEstimator,
-        _qosController.isSome() ? _qosController.get() : &qosController,
-        authorizer),
-    files(slave::READONLY_HTTP_AUTHENTICATION_REALM)
+        files,
+        gc,
+        taskStatusUpdateManager,
+        resourceEstimator,
+        qosController,
+        secretGenerator,
+        authorizer)
 {
   // Set up default behaviors, calling the original methods.
-  EXPECT_CALL(*this, runTask(_, _, _, _, _))
+  EXPECT_CALL(*this, runTask(_, _, _, _, _, _))
     .WillRepeatedly(Invoke(this, &MockSlave::unmocked_runTask));
-  EXPECT_CALL(*this, _run(_, _, _, _, _))
+  EXPECT_CALL(*this, _run(_, _, _, _, _, _))
     .WillRepeatedly(Invoke(this, &MockSlave::unmocked__run));
-  EXPECT_CALL(*this, runTaskGroup(_, _, _, _))
+  EXPECT_CALL(*this, runTaskGroup(_, _, _, _, _))
     .WillRepeatedly(Invoke(this, &MockSlave::unmocked_runTaskGroup));
   EXPECT_CALL(*this, killTask(_, _))
     .WillRepeatedly(Invoke(this, &MockSlave::unmocked_killTask));
@@ -135,12 +134,10 @@ MockSlave::MockSlave(
     .WillRepeatedly(Invoke(this, &MockSlave::unmocked_qosCorrections));
   EXPECT_CALL(*this, usage())
     .WillRepeatedly(Invoke(this, &MockSlave::unmocked_usage));
-}
-
-
-MockSlave::~MockSlave()
-{
-  delete statusUpdateManager;
+  EXPECT_CALL(*this, executorTerminated(_, _, _))
+    .WillRepeatedly(Invoke(this, &MockSlave::unmocked_executorTerminated));
+  EXPECT_CALL(*this, shutdownExecutor(_, _, _))
+    .WillRepeatedly(Invoke(this, &MockSlave::unmocked_shutdownExecutor));
 }
 
 
@@ -149,21 +146,34 @@ void MockSlave::unmocked_runTask(
     const FrameworkInfo& frameworkInfo,
     const FrameworkID& frameworkId,
     const UPID& pid,
-    const TaskInfo& task)
+    const TaskInfo& task,
+    const vector<ResourceVersionUUID>& resourceVersionUuids)
 {
-  slave::Slave::runTask(from, frameworkInfo, frameworkInfo.id(), pid, task);
+  slave::Slave::runTask(
+      from,
+      frameworkInfo,
+      frameworkInfo.id(),
+      pid,
+      task,
+      resourceVersionUuids);
 }
 
 
 void MockSlave::unmocked__run(
-    const Future<bool>& future,
+    const Future<list<bool>>& unschedules,
     const FrameworkInfo& frameworkInfo,
     const ExecutorInfo& executorInfo,
     const Option<TaskInfo>& taskInfo,
-    const Option<TaskGroupInfo>& taskGroup)
+    const Option<TaskGroupInfo>& taskGroup,
+    const std::vector<ResourceVersionUUID>& resourceVersionUuids)
 {
   slave::Slave::_run(
-      future, frameworkInfo, executorInfo, taskInfo, taskGroup);
+      unschedules,
+      frameworkInfo,
+      executorInfo,
+      taskInfo,
+      taskGroup,
+      resourceVersionUuids);
 }
 
 
@@ -171,9 +181,15 @@ void MockSlave::unmocked_runTaskGroup(
     const UPID& from,
     const FrameworkInfo& frameworkInfo,
     const ExecutorInfo& executorInfo,
-    const TaskGroupInfo& taskGroup)
+    const TaskGroupInfo& taskGroup,
+    const vector<ResourceVersionUUID>& resourceVersionUuids)
 {
-  slave::Slave::runTaskGroup(from, frameworkInfo, executorInfo, taskGroup);
+  slave::Slave::runTaskGroup(
+      from,
+      frameworkInfo,
+      executorInfo,
+      taskGroup,
+      resourceVersionUuids);
 }
 
 
@@ -206,6 +222,24 @@ void MockSlave::unmocked_qosCorrections()
 Future<ResourceUsage> MockSlave::unmocked_usage()
 {
   return slave::Slave::usage();
+}
+
+
+void MockSlave::unmocked_executorTerminated(
+    const FrameworkID& frameworkId,
+    const ExecutorID& executorId,
+    const Future<Option<ContainerTermination>>& termination)
+{
+  slave::Slave::executorTerminated(frameworkId, executorId, termination);
+}
+
+
+void MockSlave::unmocked_shutdownExecutor(
+    const UPID& from,
+    const FrameworkID& frameworkId,
+    const ExecutorID& executorId)
+{
+  slave::Slave::shutdownExecutor(from, frameworkId, executorId);
 }
 
 } // namespace tests {

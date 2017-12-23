@@ -24,7 +24,7 @@ Once you have successfully built and installed your new binaries, here are the e
 **NOTE:** Prior to 1.0, the SSL related environment variables used to be prefixed by `SSL_`. However, we found that they may collide with other programs and lead to unexpected results (e.g., openssl, see [MESOS-5863](https://issues.apache.org/jira/browse/MESOS-5863) for details). To be backward compatible, we accept environment variables prefixed by both `SSL_` or `LIBPROCESS_SSL_`. New users should use the `LIBPROCESS_SSL_` version.
 
 #### LIBPROCESS_SSL_ENABLED=(false|0,true|1) [default=false|0]
-Turn on or off SSL. When it is turned off it is the equivalent of default mesos with libevent as the backing for events. All sockets default to the non-SSL implementation. When it is turned on, the default configuration for sockets is SSL. This means outgoing connections will use SSL, and incoming connections will be expected to speak SSL as well. None of the below flags are relevant if SSL is not enabled.  If SSL is enabled, `LIBPROCESS_SSL_CERT_FILE` and `LIBPROCESS_SSL_KEY_FILE` must be supplied.
+Turn on or off SSL. When it is turned off it is the equivalent of default Mesos with libevent as the backing for events. All sockets default to the non-SSL implementation. When it is turned on, the default configuration for sockets is SSL. This means outgoing connections will use SSL, and incoming connections will be expected to speak SSL as well. None of the below flags are relevant if SSL is not enabled.  If SSL is enabled, `LIBPROCESS_SSL_CERT_FILE` and `LIBPROCESS_SSL_KEY_FILE` must be supplied.
 
 #### LIBPROCESS_SSL_SUPPORT_DOWNGRADE=(false|0,true|1) [default=false|0]
 Control whether or not non-SSL connections can be established. If this is enabled __on the accepting side__, then the accepting side will downgrade to a non-SSL socket if the connecting side is attempting to communicate via non-SSL. (e.g. HTTP). See [Upgrading Your Cluster](#Upgrading) for more details.
@@ -74,6 +74,10 @@ The above switches enable / disable the specified protocols. By default only TLS
 _SSLv2 is disabled completely because modern versions of OpenSSL disable it using multiple compile time configuration options._
 #<a name="Dependencies"></a>Dependencies
 
+#### LIBPROCESS_SSL_ECDH_CURVE=(auto|list of curves separated by ':') [default=auto]
+List of elliptic curves which should be used for ECDHE-based cipher suites, in preferred order. Available values depend on the OpenSSL version used. Default value `auto` allows OpenSSL to pick the curve automatically.
+OpenSSL versions prior to `1.0.2` allow for the use of only one curve; in those cases, `auto` defaults to `prime256v1`.
+
 ### libevent
 We require the OpenSSL support from libevent. The suggested version of libevent is [`2.0.22-stable`](https://github.com/libevent/libevent/releases/tag/release-2.0.22-stable). As new releases come out we will try to maintain compatibility.
 
@@ -84,7 +88,7 @@ brew install libevent
 
 ### OpenSSL
 We require [OpenSSL](https://github.com/openssl/openssl). There are multiple branches of OpenSSL that are being maintained by the community. Since security requires being vigilant, we recommend reading the release notes for the current releases of OpenSSL and deciding on a version within your organization based on your security needs. Mesos is not too deeply dependent on specific OpenSSL versions, so there is room for you to make security decisions as an organization.
-Please ensure the `event2` and `openssl` headers are available for building mesos.
+Please ensure the `event2` and `openssl` headers are available for building Mesos.
 
 ~~~
 // For example, on OSX:

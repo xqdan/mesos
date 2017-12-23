@@ -30,6 +30,8 @@
 
 #include <mesos/uri/fetcher.hpp>
 
+#include <mesos/secret/resolver.hpp>
+
 #include "slave/flags.hpp"
 
 namespace mesos {
@@ -42,7 +44,8 @@ class Puller
 public:
   static Try<process::Owned<Puller>> create(
       const Flags& flags,
-      const process::Shared<uri::Fetcher>& fetcher);
+      const process::Shared<uri::Fetcher>& fetcher,
+      SecretResolver* secretResolver = nullptr);
 
   virtual ~Puller() {}
 
@@ -57,7 +60,9 @@ public:
    */
   virtual process::Future<std::vector<std::string>> pull(
       const ::docker::spec::ImageReference& reference,
-      const std::string& directory) = 0;
+      const std::string& directory,
+      const std::string& backend,
+      const Option<Secret>& config = None()) = 0;
 };
 
 } // namespace docker {

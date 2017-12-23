@@ -24,35 +24,50 @@ BUILT_SOURCES = # Initialized to enable using +=.
 #  '--srcdir=...' when configuring.
 CONFIGURE_ARGS = @CONFIGURE_ARGS@ --enable-shared=no --with-pic --srcdir=.
 
+# Set up building flags for non-bundled libraries.
+SSL_INCLUDE_FLAGS = @SSL_CPPFLAGS@
+SSL_LINKER_FLAGS = @SSL_LINKERFLAGS@
+ZLIB_INCLUDE_FLAGS = @ZLIB_CPPFLAGS@
+ZLIB_LINKER_FLAGS = @ZLIB_LINKERFLAGS@
+
 # Directory which holds bundled dependencies
 BUNDLED_DIR = $(top_srcdir)/..
 
 include ../../versions.am
 
 BOOST = boost-$(BOOST_VERSION)
+CONCURRENTQUEUE = concurrentqueue-$(CONCURRENTQUEUE_VERSION)
 GLOG = glog-$(GLOG_VERSION)
-GMOCK = gmock-$(GMOCK_VERSION)
+GOOGLETEST = googletest-release-$(GOOGLETEST_VERSION)
+GMOCK = $(GOOGLETEST)/googlemock
 GPERFTOOLS = gperftools-$(GPERFTOOLS_VERSION)
-GTEST = $(GMOCK)/gtest
+GRPC = grpc-$(GRPC_VERSION)
+GTEST = $(GOOGLETEST)/googletest
 HTTP_PARSER = http-parser-$(HTTP_PARSER_VERSION)
 LIBEV = libev-$(LIBEV_VERSION)
 PROTOBUF = protobuf-$(PROTOBUF_VERSION)
 PICOJSON = picojson-$(PICOJSON_VERSION)
 
-EXTRA_DIST =		\
-  $(BOOST).tar.gz	\
-  $(GLOG).tar.gz	\
-  $(GMOCK).tar.gz	\
-  $(GPERFTOOLS).tar.gz	\
-  $(HTTP_PARSER).tar.gz	\
-  $(LIBEV).tar.gz	\
-  $(PROTOBUF).tar.gz	\
+EXTRA_DIST =			\
+  $(BOOST).tar.gz		\
+  $(CONCURRENTQUEUE).tar.gz	\
+  $(GLOG).tar.gz		\
+  $(GOOGLETEST).tar.gz		\
+  $(GPERFTOOLS).tar.gz		\
+  $(GRPC).tar.gz		\
+  $(HTTP_PARSER).tar.gz		\
+  $(LIBEV).tar.gz		\
+  $(PROTOBUF).tar.gz		\
   $(PICOJSON).tar.gz
 
 # We need to patch glog in order to deal with a compilation issue when
 # compiling with clang (and C++11); see MESOS-860, MESOS-966.
 EXTRA_DIST +=		\
   $(GLOG).patch
+
+# We patch grpc for CMake compilation issues.
+EXTRA_DIST +=		\
+  $(GRPC).patch
 
 # We patch http-parser to avoid a name collision with our `flags` namespace.
 EXTRA_DIST +=		\
@@ -67,14 +82,16 @@ EXTRA_DIST +=		\
 EXTRA_DIST +=		\
   $(PROTOBUF).patch
 
-CLEAN_EXTRACTED =	\
-  $(BOOST)		\
-  $(GLOG)		\
-  $(GMOCK)		\
-  $(GPERFTOOLS)		\
-  $(HTTP_PARSER)	\
-  $(LIBEV)		\
-  $(PICOJSON)		\
+CLEAN_EXTRACTED =		\
+  $(BOOST)			\
+  $(CONCURRENTQUEUE)		\
+  $(GLOG)			\
+  $(GRPC)			\
+  $(GOOGLETEST)			\
+  $(GPERFTOOLS)			\
+  $(HTTP_PARSER)		\
+  $(LIBEV)			\
+  $(PICOJSON)			\
   $(PROTOBUF)
 
 # This is where the magic happens: we use stamp files as dependencies
@@ -90,6 +107,10 @@ ALL_LOCAL = # Initialize ALL_LOCAL so we can add to it.
 
 if WITH_BUNDLED_BOOST
   ALL_LOCAL += $(BOOST)-stamp
+endif
+
+if WITH_BUNDLED_CONCURRENTQUEUE
+  ALL_LOCAL += $(CONCURRENTQUEUE)-stamp
 endif
 
 if WITH_BUNDLED_GLOG
@@ -160,12 +181,60 @@ endif
 if WITH_BUNDLED_PROTOBUF
 $(PROTOBUF)/src/protoc $(PROTOBUF)/src/libprotobuf.la: $(PROTOBUF)-build-stamp
 
+# NOTE: The `--with-zlib` flag works differently between libprocess and
+# Protobuf. Protobuf uses `--with-zlib` as an on/off switch for data
+# compression instead of a path specifier for ZLib, so we need to set up
+# the `CPPFLAGS` and `LDFLAGS` if `--with-zlib=DIR` is given.
 $(PROTOBUF)-build-stamp: $(PROTOBUF)-stamp
-	cd $(PROTOBUF) && ./configure $(CONFIGURE_ARGS) && \
-        $(MAKE) $(AM_MAKEFLAGS)
+	cd $(PROTOBUF) &&				\
+	  ./configure $(CONFIGURE_ARGS)			\
+	              CPPFLAGS="$(ZLIB_INCLUDE_FLAGS)"	\
+	              LDFLAGS="$(ZLIB_LINKER_FLAGS)" &&	\
+	  $(MAKE) $(AM_MAKEFLAGS)
 	touch $@
 ALL_LOCAL += $(PROTOBUF)/src/libprotobuf.la
 ALL_LOCAL += $(PROTOBUF)/src/protoc
+
+PROTOBUF_INCLUDE_FLAGS = -I$(abs_builddir)/$(PROTOBUF)/src
+PROTOBUF_LINKER_FLAGS = -L$(abs_builddir)/$(PROTOBUF)/src/.libs
+PROTOC = $(abs_builddir)/$(PROTOBUF)/src/protoc
+else
+$(PROTOBUF)-build-stamp:
+	touch $@
+
+PROTOBUF_INCLUDE_FLAGS = @PROTOBUF_CPPFLAGS@
+PROTOBUF_LINKER_FLAGS = @PROTOBUF_LINKERFLAGS@
+PROTOC = @PROTOCOMPILER@
+endif
+
+if ENABLE_GRPC
+if WITH_BUNDLED_GRPC
+LIB_GRPC = $(GRPC)/libs/opt/libgrpc++.a		\
+           $(GRPC)/libs/opt/libgrpc.a		\
+           $(GRPC)/libs/opt/libgpr.a
+
+$(LIB_GRPC): $(GRPC)-build-stamp
+
+$(GRPC)-build-stamp: $(GRPC)-stamp		\
+                     $(PROTOBUF)-build-stamp
+	cd $(GRPC) &&				\
+	  CPPFLAGS="$(PROTOBUF_INCLUDE_FLAGS)	\
+	            $(SSL_INCLUDE_FLAGS)	\
+	            $(ZLIB_INCLUDE_FLAGS)"	\
+	  LDFLAGS="$(PROTOBUF_LINKER_FLAGS)	\
+	           $(SSL_LINKER_FLAGS)		\
+	           $(ZLIB_LINKERFLAGS)"		\
+	  $(MAKE) $(AM_MAKEFLAGS)		\
+	          HAS_PKG_CONFIG=false		\
+	          NO_PROTOC=false		\
+	          PROTOC=$(PROTOC)
+	touch $@
+
+ALL_LOCAL += $(LIB_GRPC)
+else
+$(GRPC)-build-stamp:
+	touch $@
+endif
 endif
 
 # Convenience library for gmock/gtest.
@@ -177,7 +246,7 @@ libgmock_la_CPPFLAGS =			\
   -I$(GTEST)/include -I$(GTEST) -I$(GTEST)/src	\
   -I$(GMOCK)/include -I$(GMOCK) -I$(GMOCK)/src
 
-  gmock_sources.cc: $(GMOCK)-stamp
+  gmock_sources.cc: $(GOOGLETEST)-stamp
 
 $(GMOCK)-build-stamp: libgmock.la
 	touch $@

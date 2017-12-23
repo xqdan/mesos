@@ -13,7 +13,6 @@
 #ifndef __STOUT_OS_STAT_HPP__
 #define __STOUT_OS_STAT_HPP__
 
-
 // For readability, we minimize the number of #ifdef blocks in the code by
 // splitting platform specific system calls into separate directories.
 #ifdef __WINDOWS__

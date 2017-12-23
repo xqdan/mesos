@@ -298,6 +298,10 @@ public:
   std::map<std::string, Option<std::string>> extract(
       const std::string& prefix) const;
 
+  // Build environment variables from the flags.
+  std::map<std::string, std::string> buildEnvironment(
+      const Option<std::string>& prefix = None()) const;
+
 protected:
   // The program's name, extracted from argv[0] by default;
   // declared 'protected' so that derived classes can alter this
@@ -538,6 +542,26 @@ inline std::map<std::string, Option<std::string>> FlagsBase::extract(
 }
 
 
+inline std::map<std::string, std::string> FlagsBase::buildEnvironment(
+    const Option<std::string>& prefix) const
+{
+  std::map<std::string, std::string> result;
+
+  foreachvalue (const Flag& flag, flags_) {
+    Option<std::string> value = flag.stringify(*this);
+    if (value.isSome()) {
+      const std::string key = prefix.isSome()
+        ? prefix.get() + strings::upper(flag.effective_name().value)
+        : strings::upper(flag.effective_name().value);
+
+      result[key] = value.get();
+    }
+  }
+
+  return result;
+}
+
+
 inline Try<Warnings> FlagsBase::load(const std::string& prefix)
 {
   return load(extract(prefix));
@@ -573,7 +597,7 @@ inline Try<Warnings> FlagsBase::load(
     std::string name;
     Option<std::string> value = None();
 
-    size_t eq = arg.find_first_of("=");
+    size_t eq = arg.find_first_of('=');
     if (eq == std::string::npos && arg.find("--no-") == 0) { // --no-name
       name = arg.substr(2);
     } else if (eq == std::string::npos) {                    // --name
@@ -629,7 +653,7 @@ inline Try<Warnings> FlagsBase::load(
     std::string name;
     Option<std::string> value = None();
 
-    size_t eq = arg.find_first_of("=");
+    size_t eq = arg.find_first_of('=');
     if (eq == std::string::npos && arg.find("--no-") == 0) { // --no-name
       name = arg.substr(2);
     } else if (eq == std::string::npos) {                    // --name
@@ -812,7 +836,7 @@ inline Try<Warnings> FlagsBase::load(
 }
 
 
-inline std::string FlagsBase::usage( const Option<std::string>& message) const
+inline std::string FlagsBase::usage(const Option<std::string>& message) const
 {
   const int PAD = 5;
 

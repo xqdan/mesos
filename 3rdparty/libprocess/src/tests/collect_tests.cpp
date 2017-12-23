@@ -10,15 +10,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License
 
+#include <string>
+
 #include <process/collect.hpp>
 #include <process/gtest.hpp>
+#include <process/owned.hpp>
 
 #include <stout/gtest.hpp>
+#include <stout/stringify.hpp>
 
 using process::Future;
+using process::Owned;
 using process::Promise;
 
 using std::list;
+using std::string;
 
 TEST(CollectTest, Ready)
 {
@@ -111,20 +117,48 @@ TEST(CollectTest, Failure)
 
 TEST(CollectTest, DiscardPropagation)
 {
-  Future<int> future1;
-  Future<bool> future2;
+  Promise<int> promise1;
+  Promise<bool> promise2;
 
-  future1
-    .onDiscard([=](){ process::internal::discarded(future1); });
-  future2
-    .onDiscard([=](){ process::internal::discarded(future2); });
+  promise1.future()
+    .onDiscard([&](){ promise1.discard(); });
+  promise2.future()
+    .onDiscard([&](){ promise2.discard(); });
 
-  Future<std::tuple<int, bool>> collect = process::collect(future1, future2);
+  Future<std::tuple<int, bool>> collect = process::collect(
+      promise1.future(),
+      promise2.future());
 
   collect.discard();
 
-  AWAIT_DISCARDED(future1);
-  AWAIT_DISCARDED(future2);
+  AWAIT_DISCARDED(collect);
+
+  AWAIT_DISCARDED(promise1.future());
+  AWAIT_DISCARDED(promise2.future());
+}
+
+
+TEST(CollectTest, AbandonedPropagation)
+{
+  Owned<Promise<int>> promise(new Promise<int>());
+
+  // There is a race from the time that we reset the promise to when
+  // the collect process is terminated so we need to use
+  // Future::recover to properly handle this case.
+  Future<int> future = process::collect(promise->future())
+    .recover([](const Future<std::tuple<int>>& f) -> Future<std::tuple<int>> {
+      if (f.isAbandoned()) {
+        return std::make_tuple(42);
+      }
+      return f;
+    })
+    .then([](const std::tuple<int>& t) {
+      return std::get<0>(t);
+    });
+
+  promise.reset();
+
+  AWAIT_EQ(42, future);
 }
 
 
@@ -226,19 +260,113 @@ TEST(AwaitTest, Discarded)
 
 TEST(AwaitTest, DiscardPropagation)
 {
-  Future<int> future1;
-  Future<bool> future2;
+  Promise<int> promise1;
+  Promise<bool> promise2;
 
-  future1
-    .onDiscard([=](){ process::internal::discarded(future1); });
-  future2
-    .onDiscard([=](){ process::internal::discarded(future2); });
+  promise1.future()
+    .onDiscard([&](){ promise1.discard(); });
+  promise2.future()
+    .onDiscard([&](){ promise2.discard(); });
 
-  Future<std::tuple<Future<int>, Future<bool>>> await =
-    process::await(future1, future2);
+  Future<std::tuple<Future<int>, Future<bool>>> await = process::await(
+      promise1.future(),
+      promise2.future());
 
   await.discard();
 
-  AWAIT_DISCARDED(future1);
-  AWAIT_DISCARDED(future2);
+  AWAIT_DISCARDED(await);
+
+  AWAIT_DISCARDED(promise1.future());
+  AWAIT_DISCARDED(promise2.future());
+}
+
+
+TEST(AwaitTest, AbandonedPropagation)
+{
+  Owned<Promise<int>> promise(new Promise<int>());
+
+  // There is a race from the time that we reset the promise to when
+  // the await process is terminated so we need to use
+  // Future::recover to properly handle this case.
+  Future<int> future = process::await(promise->future(), Future<int>())
+    .recover([](const Future<std::tuple<Future<int>, Future<int>>>& f)
+             -> Future<std::tuple<Future<int>, Future<int>>> {
+      if (f.isAbandoned()) {
+        return std::make_tuple(42, 0);
+      }
+      return f;
+    })
+    .then([](const std::tuple<Future<int>, Future<int>>& t) {
+      return std::get<0>(t)
+        .then([](int i) {
+          return i;
+        });
+    });
+
+  promise.reset();
+
+  AWAIT_EQ(42, future);
+}
+
+
+TEST(AwaitTest, AwaitSingleDiscard)
+{
+  Promise<int> promise;
+
+  auto bar = [&]() {
+    return promise.future();
+  };
+
+  auto foo = [&]() {
+    return await(bar())
+      .then([](const Future<int>& f) {
+        return f
+          .then([](int i) {
+            return stringify(i);
+          });
+      });
+  };
+
+  Future<string> future = foo();
+
+  future.discard();
+
+  AWAIT_DISCARDED(future);
+
+  EXPECT_TRUE(promise.future().hasDiscard());
+}
+
+
+TEST(AwaitTest, AwaitSingleAbandon)
+{
+  Owned<Promise<int>> promise(new Promise<int>());
+
+  auto bar = [&]() {
+    return promise->future();
+  };
+
+  auto foo = [&]() {
+    return await(bar())
+      .then([](const Future<int>& f) {
+        return f
+          .then([](int i) {
+            return stringify(i);
+          });
+      });
+  };
+
+  // There is a race from the time that we reset the promise to when
+  // the await process is terminated so we need to use Future::recover
+  // to properly handle this case.
+  Future<string> future = foo()
+    .recover([](const Future<string>& f) -> Future<string> {
+      if (f.isAbandoned()) {
+        return "hello";
+      }
+      return f;
+    });
+
+  promise.reset();
+
+  AWAIT_EQ("hello", future);
 }

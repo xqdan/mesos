@@ -13,76 +13,141 @@ Mesos 1.0.0 introduced experimental support for Windows.
 
 ### System Requirements
 
-1. Install the latest version of [Visual Studio Community 2015](https://www.visualstudio.com/post-download-vs?sku=community).
-   Make sure to select the Common Tools for Visual C++ and the Windows 10 SDK.
-   Start Visual Studio Community to complete the setup and configuration.
-2. Install [CMake 3.5.2 or later](https://cmake.org/files/v3.5/cmake-3.5.2-win32-x86.msi).
-   Do not run CMake before finishing the Visual Studio Community setup.
-3. Install [Gnu Patch 2.5.9-7 or later](http://downloads.sourceforge.net/project/gnuwin32/patch/2.5.9-7/patch-2.5.9-7-setup.exe).
-4. If building from git, make sure you have Windows-style line endings.
-   i.e. `git config core.autocrlf true`.
+1. Install the latest [Visual Studio 2017](https://www.visualstudio.com/downloads/):
+   The "Community" edition is sufficient (and free).
+   During installation, choose the "Desktop development with C++" workload.
+
+2. Install [CMake 3.8.0](https://cmake.org/download/) or later.
+   During installation, choose to "Add CMake to the system PATH for all users".
+
+3. Install [GNU patch for Windows](http://gnuwin32.sourceforge.net/packages/patch.htm).
+
+4. If building from source, install [Git](https://git-scm.com/download/win).
+   During installation, keep the defaults to "Use Git from the Windows
+   Command Prompt", and "Checkout Windows-style, commit Unix-style
+   line endings" (i.e. `git config core.autocrlf true`).
+
 5. Make sure there are no spaces in your build directory.
    For example, `C:/Program Files (x86)/mesos` is an invalid build directory.
+
+6. If developing Mesos, install [Python 2](https://www.python.org/downloads/)
+   (not Python 3), in order to use our support scripts (e.g. to post and apply
+   patches, or lint source code).
 
 
 ### Build Instructions
 
-Following are the instructions for stock Windows 10 and Windows Server 2012 or newer.
+Following are the instructions for Windows 10.
 
-    # Start a VS2015 x64 Native Tool command prompt.
-    # This can be found by opening VS2015 and looking under the "tools"
-    # menu for "Visual Studio Command Prompt".
+    # Clone (or extract) Mesos.
+    git clone https://git-wip-us.apache.org/repos/asf/mesos.git
+    cd mesos
 
-    # Change working directory.
-    $ cd mesos
+    # Configure using CMake for an out-of-tree build.
+    mkdir build
+    cd build
+    cmake .. -G "Visual Studio 15 2017 Win64" -T "host=x64" -DENABLE_LIBEVENT=1
 
-    # If you are developing on Windows, we recommend running the bootstrap.
-    # This requires administrator privileges.
-    $ .\bootstrap.bat
-
-    # Generate the solution and build.
-    $ mkdir build
-    $ cd build
-    $ cmake .. -G "Visual Studio 14 2015 Win64" -DENABLE_LIBEVENT=1
-
-    # After generating the Visual Studio solution you can use the IDE to open
-    # the project and skip the next step. In this case it is recommended to set
-    # `PreferredToolArchitecture` environment variable to `x64`.
-    # NOTE: `PreferredToolArchitecture` can be set system-wide via Control Panel.
-    $ msbuild Mesos.sln /p:PreferredToolArchitecture=x64
-
-    # mesos-agent.exe can be found in the <repository>\build\src folder.
-    $ cd src
+    # Build Mesos.
+    # To build just the Mesos agent, add `--target mesos-agent`.
+    cmake --build .
 
     # The Windows agent exposes new isolators that must be used as with
     # the `--isolation` flag. To get started point the agent to a working
     # master, using eiher an IP address or zookeeper information.
-    $ mesos-agent.exe --master=<master> --work_dir=<work folder> --isolation=windows/cpu,filesystem/windows --launcher_dir=<repository>\build\src
+    src\mesos-agent.exe --master=<master> --work_dir=<work folder> --launcher_dir=<repository>\build\src
 
 
 ## Known Limitations
 
 The current implementation is known to have the following limitations:
 
-* At this point, only the agent is capable of running on Windows,
-  the Mesos master must run on a Posix machine.
-* Due to the 260 character `MAX_PATH` limitation on Windows,
-  it is required to set the configuration option `--launcher_dir`
-  to be a root path, e.g. `C:\`.
-  In addition, the `TASK_ID` that is passed to Mesos should be short,
-  up to about 40 characters. **NOTE**: If you schedule tasks via Marathon,
-  your Marathon task id should be up to four characters long since Marathon
-  generates Mesos `TASK_ID` by appending a UUID (36 characters) onto
-  the Marathon task id.
-* Currently runs as Administrator (mainly due to symlinks).
-* Only the `MesosContainerizer` is currently supported,
-  which does not provide resource isolation on Windows.
-  Resource isolation will be provided via the `DockerContainerizer`
-  (e.g. Windows Containers) in the future.
-* Most of the tests are not ported to Windows.
+* Only the agent should be run on Windows.  The Mesos master can be
+  launched, but only for testing as the master does not support
+  high-availability setups on Windows.
+
+* While Mesos supports NTFS long paths internally, tasks which do not support
+  long paths must be run on agent whose `--work_dir` is a short path.
+
+* The minimum versions of Windows supported are: Windows 10 Creators Update (AKA
+  version 1703, build number 15063), and [Windows Server, version 1709][server].
+  It is likely that this will increase, due to evolving Windows container
+  support and developer features which ease porting.
+
+[server]: https://docs.microsoft.com/en-us/windows-server/get-started/get-started-with-1709
 
 
 ## Status
 
 For more information regarding the status of Windows support in Mesos,
-please refer to the [Jira epic](https://issues.apache.org/jira/browse/MESOS-3094).
+please refer to the [JIRA epic](https://issues.apache.org/jira/browse/MESOS-3094).
+
+## Build Configuration Examples
+
+### Building with Java
+
+This enables more unit tests, but we do not yet officially produce
+`mesos-master`.
+
+When building with Java on Windows, you must add the [Maven][] build tool to
+your path. The `JAVA_HOME` environment variable must also be manually set.
+An installation of the Java SDK can be found form [Oracle][].
+
+[maven]: https://maven.apache.org/guides/getting-started/windows-prerequisites.html
+[oracle]: http://www.oracle.com/technetwork/java/javase/downloads/index.html
+
+As of this writing, Java 9 is not yet supported, but Java 8 has been tested.
+
+The Java build defaults to `OFF` because it is slow. To build the Java
+components on Windows, turn it `ON`:
+
+```powershell
+mkdir build; cd build
+$env:PATH += ";C:\...\apache-maven-3.3.9\bin\"
+$env:JAVA_HOME = "C:\Program Files\Java\jdk1.8.0_144"
+cmake .. -DENABLE_JAVA=ON -DENABLE_LIBEVENT=ON -G "Visual Studio 15 2017 Win64" -T "host=x64"
+cmake --build . --target mesos-java
+```
+
+Note that the `mesos-java` library does not have to be manually built; as
+`libmesos` will link it when Java is enabled.
+
+Unfortunately, on Windows the `FindJNI` CMake module will populate `JAVA_JVM_LIBRARY` with
+the path to the static `jvm.lib`, but this variable must point to the shared
+library, `jvm.dll`, as it is loaded at runtime. Set it correctly like this:
+
+```
+$env:JAVA_JVM_LIBRARY = "C:\Program Files\Java\jdk1.8.0_144\jre\bin\server\jvm.dll"
+```
+
+The library may still fail to load at runtime with the following error:
+
+> "The specified module could not be found."
+
+If this is the case, and the path to `jvm.dll` is verified to be correct, then
+the error message actually indicates that the dependencies of `jvm.dll` could
+not be found. On Windows, the DLL search path includes the environment variable
+`PATH`, so add the `bin` folder which contains `server\jvm.dll` to `PATH`:
+
+```
+$env:PATH += ";C:\Program Files\Java\jdk1.8.0_144\jre\bin"
+```
+
+### Building with OpenSSL
+
+When building with OpenSSL on Windows, you must build or install a distribution
+of OpenSSL for Windows. A commonly chosen distribution is
+[Shining Light Productions' OpenSSL][openssl].
+
+[openssl]: https://slproweb.com/products/Win32OpenSSL.html
+
+As of this writing, OpenSSL 1.1.x is not yet supported, but 1.0.2M has been
+tested.
+
+Use `-DENABLE_SSL=ON` when running CMake to build with OpenSSL.
+
+Note that it will link to OpenSSL dynamically, so if the built executables are
+deployed elsewhere, that machine also needs OpenSSL installed.
+
+Beware that the OpenSSL installation, nor Mesos itself, comes with a certificate
+bundle, and so it is likely that certificate verification will fail.

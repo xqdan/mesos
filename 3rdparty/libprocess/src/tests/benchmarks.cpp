@@ -18,26 +18,33 @@
 
 #include <gmock/gmock.h>
 
+#include <deque>
 #include <iostream>
 #include <memory>
 #include <string>
 #include <vector>
 
 #include <process/collect.hpp>
+#include <process/count_down_latch.hpp>
 #include <process/future.hpp>
 #include <process/gmock.hpp>
 #include <process/gtest.hpp>
 #include <process/owned.hpp>
 #include <process/process.hpp>
+#include <process/protobuf.hpp>
 
 #include <stout/duration.hpp>
 #include <stout/gtest.hpp>
 #include <stout/hashset.hpp>
 #include <stout/stopwatch.hpp>
 
+#include "benchmarks.pb.h"
+
 namespace http = process::http;
 
+using process::CountDownLatch;
 using process::Future;
+using process::MessageEvent;
 using process::Owned;
 using process::Process;
 using process::ProcessBase;
@@ -63,7 +70,10 @@ int main(int argc, char** argv)
   listeners.Append(process::ClockTestEventListener::instance());
   listeners.Append(process::FilterTestEventListener::instance());
 
-  return RUN_ALL_TESTS();
+  int result = RUN_ALL_TESTS();
+
+  process::finalize(true);
+  return result;
 }
 
 // TODO(jmlvanre): Factor out the client / server behavior so that we
@@ -199,6 +209,7 @@ public:
 protected:
   virtual void initialize()
   {
+    // TODO(bmahler): Move in the message when move support is added.
     install("ping", &ServerProcess::ping);
   }
 
@@ -285,8 +296,6 @@ TEST(ProcessTest, Process_BENCHMARK_ClientServer)
 
   terminate(server);
   wait(server);
-
-  return;
 }
 
 
@@ -369,5 +378,306 @@ TEST(ProcessTest, Process_BENCHMARK_LargeNumberOfLinks)
     terminate(process);
     wait(process);
     delete process;
+  }
+}
+
+
+class Destination : public Process<Destination>
+{
+protected:
+  void consume(MessageEvent&& event) override
+  {
+    if (event.message.name == "ping") {
+      send(event.message.from, "pong");
+    }
+  }
+};
+
+
+class Client : public Process<Client>
+{
+public:
+  Client(const UPID& destination, CountDownLatch* latch, long repeat)
+    : destination(destination), latch(latch), repeat(repeat) {}
+
+protected:
+  void consume(MessageEvent&& event) override
+  {
+    if (event.message.name == "pong") {
+      received += 1;
+      if (sent < repeat) {
+        send(destination, "ping");
+        sent += 1;
+      } else if (received >= repeat) {
+        latch->decrement();
+      }
+    } else if (event.message.name == "run") {
+      for (long l = 0; l < std::min(1000L, repeat); l++) {
+        send(destination, "ping");
+        sent += 1;
+      }
+    }
+  }
+
+private:
+  UPID destination;
+  CountDownLatch* latch;
+  long repeat;
+  long sent = 0L;
+  long received = 0L;
+};
+
+
+// See
+// https://github.com/akka/akka/blob/7ac37e7536547c57ab639ed8746c7b4e5ff2f69b/akka-actor-tests/src/test/scala/akka/performance/microbench/TellThroughputPerformanceSpec.scala
+// for the inspiration for this benchmark (this file was deleted in
+// this commit:
+// https://github.com/akka/akka/commit/a02e138f3bc7c21c2b2511ea19203a52d74584d5).
+//
+// This benchmark was discussed here:
+// http://letitcrash.com/post/17607272336/scalability-of-fork-join-pool
+TEST(ProcessTest, Process_BENCHMARK_ThroughputPerformance)
+{
+  long repeatFactor = 500L;
+  long defaultRepeat = 30000L * repeatFactor;
+
+  const long numberOfClients = process::workers();
+
+  CountDownLatch latch(numberOfClients - 1);
+
+  long repeat = defaultRepeat;
+
+  auto repeatsPerClient = repeat / numberOfClients;
+
+  vector<Owned<Destination>> destinations;
+  vector<Owned<Client>> clients;
+
+  for (long _ = 0; _ < numberOfClients; _++) {
+    Owned<Destination> destination(new Destination());
+
+    spawn(*destination);
+
+    Owned<Client> client(new Client(
+        destination->self(),
+        &latch,
+        repeatsPerClient));
+
+    spawn(*client);
+
+    destinations.push_back(destination);
+    clients.push_back(client);
+  }
+
+  Stopwatch watch;
+  watch.start();
+
+  foreach (const Owned<Client>& client, clients) {
+    post(client->self(), "run");
+  }
+
+  AWAIT_READY(latch.triggered());
+
+  Duration elapsed = watch.elapsed();
+
+  double throughput = (double) repeat / elapsed.secs();
+
+  cout << "Estimated Total: " << std::fixed << throughput << endl;
+
+  foreach (const Owned<Client>& client, clients) {
+    terminate(client->self());
+    wait(client->self());
+  }
+
+  foreach (const Owned<Destination>& destination, destinations) {
+    terminate(destination->self());
+    wait(destination->self());
+  }
+}
+
+
+class DispatchProcess : public Process<DispatchProcess>
+{
+public:
+  struct Movable
+  {
+    std::vector<int> data;
+  };
+
+  // This simulates protobuf objects, which do not support moves.
+  struct Copyable
+  {
+    std::vector<int> data;
+
+    Copyable(std::vector<int>&& data) : data(std::move(data)) {}
+    Copyable(const Copyable& that) = default;
+    Copyable& operator=(const Copyable&) = default;
+  };
+
+  DispatchProcess(Promise<Nothing> *promise, long repeat)
+    : promise(promise), repeat(repeat) {}
+
+  template <typename T>
+  Future<Nothing> handler(const T& data)
+  {
+    count++;
+    if (count >= repeat) {
+      promise->set(Nothing());
+      return Nothing();
+    }
+
+    dispatch(self(), &Self::_handler).then(
+        defer(self(), &Self::handler<T>, data));
+
+    return Nothing();
+  }
+
+  template <typename T>
+  static void run(const string& name, long repeats)
+  {
+    Promise<Nothing> promise;
+
+    Owned<DispatchProcess> process(new DispatchProcess(&promise, repeats));
+    spawn(*process);
+
+    T data{std::vector<int>(10240, 42)};
+
+    Stopwatch watch;
+    watch.start();
+
+    dispatch(process.get(), &DispatchProcess::handler<T>, data);
+
+    AWAIT_READY(promise.future());
+
+    cout << name << " elapsed: " << watch.elapsed() << endl;
+
+    terminate(process.get());
+    wait(process.get());
+  }
+
+private:
+  Future<Nothing> _handler()
+  {
+    return Nothing();
+  }
+
+  Promise<Nothing> *promise;
+  long repeat;
+  long count = 0;
+};
+
+
+TEST(ProcessTest, Process_BENCHMARK_DispatchDefer)
+{
+  constexpr long repeats = 100000;
+
+  // Test performance separately for objects which support std::move,
+  // and which don't (e.g. like protobufs).
+  // Note: DispatchProcess::handler code is not fully optimized,
+  // to take advantage of std::move support, e.g. parameter is passed
+  // by const reference, so some copying is unavoidable, however
+  // this resembles how most of the handlers are currently implemented.
+  DispatchProcess::run<DispatchProcess::Movable>("Movable", repeats);
+  DispatchProcess::run<DispatchProcess::Copyable>("Copyable", repeats);
+}
+
+
+class ProtobufInstallHandlerBenchmarkProcess
+  : public ProtobufProcess<ProtobufInstallHandlerBenchmarkProcess>
+{
+public:
+  ProtobufInstallHandlerBenchmarkProcess()
+  {
+    install<tests::Message>(&Self::handle);
+  }
+
+  // TODO(dzhuk): Add benchmark for handlers taking individual
+  // message fields as parameters.
+  void handle(const tests::Message& message)
+  {
+    // Intentionally no-op, as ProtobufProcess performance is measured
+    // from receiving MessageEvent till calling handler.
+  }
+
+  void run(int submessages)
+  {
+    tests::Message message = createMessage(submessages);
+
+    std::string data;
+    bool success = message.SerializeToString(&data);
+    CHECK(success);
+
+    Stopwatch watch;
+    watch.start();
+
+    size_t count;
+
+    for (count = 0; watch.elapsed() < Seconds(1); count++) {
+      MessageEvent event(self(), self(), message.GetTypeName(),
+          data.c_str(), data.length());
+      consume(std::move(event));
+    }
+
+    watch.stop();
+
+    double messagesPerSecond = count / watch.elapsed().secs();
+
+    cout << "Size: " << std::setw(5) << message.ByteSizeLong() << " bytes,"
+         << " throughput: " << std::setw(9) << std::setprecision(0)
+         << std::fixed << messagesPerSecond << " messages/s" << endl;
+  }
+
+private:
+  // Returns a tree with the `submessages` number of sub-messages,
+  // the branching factor is 4 and each sub-message contains a
+  // payload of two integers. E.g.
+  //
+  //                             m                            |
+  //        /           /        |        \         \         |
+  //     [1,1]         m         m         m         m        |
+  //                 //|\\     //|\\     //|\\     //|\\      |
+  //               [1,1]...  [1,1]...  [1,1]...  [1,1]...     |
+  tests::Message createMessage(size_t submessages)
+  {
+    tests::Message root;
+
+    // Construct messages tree level by level, similar to breadth-first
+    // search, where `submessages` defines the total number of nodes in
+    // the tree. Messages in the queue still need a payload and children
+    // to be added.
+    std::deque<tests::Message*> nodes;
+    nodes.push_back(&root);
+
+    while (!nodes.empty()) {
+      tests::Message* message = nodes.front();
+      nodes.pop_front();
+
+      message->mutable_payload()->Resize(2, 1);
+
+      for (size_t i = 0; i < 4; i++) {
+        if (submessages == 0) {
+          // No more nodes need to be added, but keep processing the
+          // queue to add the payloads.
+          break;
+        }
+
+        tests::Message* child = message->add_submessages();
+        nodes.push_back(child);
+        submessages--;
+      }
+    }
+
+    return root;
+  }
+};
+
+
+// Measures performance of message passing in ProtobufProcess.
+TEST(ProcessTest, Process_BENCHMARK_ProtobufInstallHandler)
+{
+  const size_t submessages[] = {0, 1, 5, 10, 50, 100, 500, 1000, 5000, 10000};
+
+  ProtobufInstallHandlerBenchmarkProcess process;
+  foreach (size_t num_submessages, submessages) {
+    process.run(num_submessages);
   }
 }

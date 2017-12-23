@@ -31,7 +31,7 @@ def _create_module(module_name):
     ext_common_dir = os.path.join(
         'src', 'python', 'native_common')
 
-    leveldb = os.path.join('3rdparty', 'leveldb-1.4')
+    leveldb = os.path.join('3rdparty', 'leveldb-1.19')
     zookeeper = os.path.join('3rdparty', 'zookeeper-3.4.8', 'src', 'c')
     libprocess = os.path.join('3rdparty', 'libprocess')
 
@@ -43,7 +43,7 @@ def _create_module(module_name):
     # libev.a and libprofiler.a).
     glog = os.path.join('3rdparty', 'glog-0.3.3')
     gperftools = os.path.join('3rdparty', 'gperftools-2.5')
-    protobuf = os.path.join('3rdparty', 'protobuf-2.6.1')
+    protobuf = os.path.join('3rdparty', 'protobuf-3.5.0')
 
     # Build the list of source files. Note that each source must be
     # relative to our current directory (where this script lives).
@@ -74,7 +74,7 @@ def _create_module(module_name):
     # For leveldb, we need to check for the presence of libleveldb.a, since
     # it is possible to disable leveldb inside mesos.
     libglog = os.path.join(abs_top_builddir, glog, '.libs', 'libglog.a')
-    libleveldb = os.path.join(abs_top_builddir, leveldb, 'libleveldb.a')
+    libleveldb = os.path.join(abs_top_builddir, leveldb, 'out-static', 'libleveldb.a')
     libzookeeper = os.path.join(
         abs_top_builddir, zookeeper, '.libs', 'libzookeeper_mt.a')
     libprotobuf = os.path.join(
@@ -123,6 +123,34 @@ def _create_module(module_name):
 
     if os.path.exists(libprofiler):
         EXTRA_OBJECTS.append(libprofiler)
+
+
+    # We need to check for the presense of libgrpc++.a, libgrpc.a and libgpr.a
+    # only if gRPC is enabled.
+    if '@ENABLE_GRPC_FALSE@' == '#':
+        grpc = os.path.join('3rdparty', 'grpc-1.4.2')
+        libgrpcxx = os.path.join(abs_top_builddir, grpc, 'libs', 'opt', 'libgrpc++.a')
+        libgrpc = os.path.join(abs_top_builddir, grpc, 'libs', 'opt', 'libgrpc.a')
+        libgpr = os.path.join(abs_top_builddir, grpc, 'libs', 'opt', 'libgpr.a')
+
+        if os.path.exists(libgrpcxx):
+            EXTRA_OBJECTS.append(libgrpcxx)
+        else:
+            EXTRA_OBJECTS.append('-lgrpc++')
+
+        if os.path.exists(libgrpc):
+            EXTRA_OBJECTS.append(libgrpc)
+        else:
+            EXTRA_OBJECTS.append('-lgrpc')
+
+        if os.path.exists(libgpr):
+            EXTRA_OBJECTS.append(libgpr)
+        else:
+            EXTRA_OBJECTS.append('-lgpr')
+
+        EXTRA_OBJECTS.append('-lssl')
+        EXTRA_OBJECTS.append('-lcrypto')
+
 
     # OSX uses a different linker (llvm-ld) and doesn't support --as-needed
     # TODO(SteveNiemitz): Feature detect --as-needed instead of looking at

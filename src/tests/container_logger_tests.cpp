@@ -21,6 +21,7 @@
 #include <gmock/gmock.h>
 
 #include <mesos/slave/container_logger.hpp>
+#include <mesos/slave/containerizer.hpp>
 
 #include <process/clock.hpp>
 #include <process/future.hpp>
@@ -34,6 +35,7 @@
 #include <stout/strings.hpp>
 #include <stout/try.hpp>
 
+#include <stout/os/constants.hpp>
 #include <stout/os/exists.hpp>
 #include <stout/os/killtree.hpp>
 #include <stout/os/mkdir.hpp>
@@ -69,7 +71,7 @@ using mesos::internal::master::Master;
 using mesos::internal::slave::Fetcher;
 using mesos::internal::slave::Launcher;
 using mesos::internal::slave::MesosContainerizer;
-using mesos::internal::slave::PosixLauncher;
+using mesos::internal::slave::SubprocessLauncher;
 using mesos::internal::slave::Provisioner;
 using mesos::internal::slave::Slave;
 
@@ -96,8 +98,11 @@ namespace mesos {
 namespace internal {
 namespace tests {
 
+// TODO(josephw): Modules are not supported on Windows (MESOS-5994).
+#ifndef __WINDOWS__
 const char LOGROTATE_CONTAINER_LOGGER_NAME[] =
   "org_apache_mesos_LogrotateContainerLogger";
+#endif // __WINDOWS__
 
 
 // Definition of a mock ContainerLogger to be used in tests with gmock.
@@ -112,7 +117,7 @@ public:
 
     // All output is redirected to STDOUT_FILENO and STDERR_FILENO.
     EXPECT_CALL(*this, prepare(_, _, _))
-      .WillRepeatedly(Return(mesos::slave::ContainerLogger::SubprocessInfo()));
+      .WillRepeatedly(Return(mesos::slave::ContainerIO()));
   }
 
   virtual ~MockContainerLogger() {}
@@ -121,7 +126,7 @@ public:
 
   MOCK_METHOD3(
       prepare,
-      Future<mesos::slave::ContainerLogger::SubprocessInfo>(
+      Future<mesos::slave::ContainerIO>(
           const ExecutorInfo&, const string&, const Option<string>&));
 };
 
@@ -142,13 +147,13 @@ TEST_F(ContainerLoggerTest, DefaultToSandbox)
   // We'll need access to these flags later.
   slave::Flags flags = CreateSlaveFlags();
 
-  Fetcher fetcher;
+  Fetcher fetcher(flags);
 
   // We use an actual containerizer + executor since we want something to run.
   Try<MesosContainerizer*> _containerizer =
     MesosContainerizer::create(flags, false, &fetcher);
 
-  CHECK_SOME(_containerizer);
+  ASSERT_SOME(_containerizer);
   Owned<MesosContainerizer> containerizer(_containerizer.get());
 
   Owned<MasterDetector> detector = master.get()->createDetector();
@@ -158,7 +163,7 @@ TEST_F(ContainerLoggerTest, DefaultToSandbox)
   ASSERT_SOME(slave);
 
   AWAIT_READY(slaveRegisteredMessage);
-  SlaveID slaveId = slaveRegisteredMessage.get().slave_id();
+  SlaveID slaveId = slaveRegisteredMessage->slave_id();
 
   MockScheduler sched;
   MesosSchedulerDriver driver(
@@ -178,25 +183,30 @@ TEST_F(ContainerLoggerTest, DefaultToSandbox)
   AWAIT_READY(frameworkId);
 
   AWAIT_READY(offers);
-  EXPECT_NE(0u, offers.get().size());
+  ASSERT_FALSE(offers->empty());
 
   // We'll start a task that outputs to stdout.
   TaskInfo task = createTask(offers.get()[0], "echo 'Hello World!'");
 
+  Future<TaskStatus> statusStarting;
   Future<TaskStatus> statusRunning;
   Future<TaskStatus> statusFinished;
   EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&statusStarting))
     .WillOnce(FutureArg<1>(&statusRunning))
     .WillOnce(FutureArg<1>(&statusFinished))
     .WillRepeatedly(Return());       // Ignore subsequent updates.
 
   driver.launchTasks(offers.get()[0].id(), {task});
 
+  AWAIT_READY(statusStarting);
+  EXPECT_EQ(TASK_STARTING, statusStarting->state());
+
   AWAIT_READY(statusRunning);
-  EXPECT_EQ(TASK_RUNNING, statusRunning.get().state());
+  EXPECT_EQ(TASK_RUNNING, statusRunning->state());
 
   AWAIT_READY(statusFinished);
-  EXPECT_EQ(TASK_FINISHED, statusFinished.get().state());
+  EXPECT_EQ(TASK_FINISHED, statusFinished->state());
 
   driver.stop();
   driver.join();
@@ -224,6 +234,8 @@ TEST_F(ContainerLoggerTest, DefaultToSandbox)
 }
 
 
+// TODO(josephw): Modules are not supported on Windows (MESOS-5994).
+#ifndef __WINDOWS__
 // Tests that the packaged logrotate container logger writes files into the
 // sandbox and keeps them at a reasonable size.
 TEST_F(ContainerLoggerTest, LOGROTATE_RotateInSandbox)
@@ -241,13 +253,13 @@ TEST_F(ContainerLoggerTest, LOGROTATE_RotateInSandbox)
   // Use the non-default container logger that rotates logs.
   flags.container_logger = LOGROTATE_CONTAINER_LOGGER_NAME;
 
-  Fetcher fetcher;
+  Fetcher fetcher(flags);
 
   // We use an actual containerizer + executor since we want something to run.
   Try<MesosContainerizer*> _containerizer =
     MesosContainerizer::create(flags, false, &fetcher);
 
-  CHECK_SOME(_containerizer);
+  ASSERT_SOME(_containerizer);
   Owned<MesosContainerizer> containerizer(_containerizer.get());
 
   Owned<MasterDetector> detector = master.get()->createDetector();
@@ -257,7 +269,7 @@ TEST_F(ContainerLoggerTest, LOGROTATE_RotateInSandbox)
   ASSERT_SOME(slave);
 
   AWAIT_READY(slaveRegisteredMessage);
-  SlaveID slaveId = slaveRegisteredMessage.get().slave_id();
+  SlaveID slaveId = slaveRegisteredMessage->slave_id();
 
   MockScheduler sched;
   MesosSchedulerDriver driver(
@@ -277,7 +289,7 @@ TEST_F(ContainerLoggerTest, LOGROTATE_RotateInSandbox)
   AWAIT_READY(frameworkId);
 
   AWAIT_READY(offers);
-  EXPECT_NE(0u, offers.get().size());
+  ASSERT_FALSE(offers->empty());
 
   // Start a task that spams stdout with 11 MB of (mostly blank) output.
   // The logrotate container logger module is loaded with parameters that limit
@@ -289,20 +301,25 @@ TEST_F(ContainerLoggerTest, LOGROTATE_RotateInSandbox)
       "i=0; while [ $i -lt 11264 ]; "
       "do printf '%-1024d\\n' $i; i=$((i+1)); done");
 
+  Future<TaskStatus> statusStarting;
   Future<TaskStatus> statusRunning;
   Future<TaskStatus> statusFinished;
   EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&statusStarting))
     .WillOnce(FutureArg<1>(&statusRunning))
     .WillOnce(FutureArg<1>(&statusFinished))
     .WillRepeatedly(Return());       // Ignore subsequent updates.
 
   driver.launchTasks(offers.get()[0].id(), {task});
 
+  AWAIT_READY(statusStarting);
+  EXPECT_EQ(TASK_STARTING, statusStarting->state());
+
   AWAIT_READY(statusRunning);
-  EXPECT_EQ(TASK_RUNNING, statusRunning.get().state());
+  EXPECT_EQ(TASK_RUNNING, statusRunning->state());
 
   AWAIT_READY(statusFinished);
-  EXPECT_EQ(TASK_FINISHED, statusFinished.get().state());
+  EXPECT_EQ(TASK_FINISHED, statusFinished->state());
 
   driver.stop();
   driver.join();
@@ -312,7 +329,7 @@ TEST_F(ContainerLoggerTest, LOGROTATE_RotateInSandbox)
   // Once they finish reading the container's pipe, they should exit.
   Try<os::ProcessTree> pstrees = os::pstree(0);
   ASSERT_SOME(pstrees);
-  foreach (const os::ProcessTree& pstree, pstrees.get().children) {
+  foreach (const os::ProcessTree& pstree, pstrees->children) {
     // Wait for the logger subprocesses to exit, for up to 5 seconds each.
     Duration waited = Duration::zero();
     do {
@@ -353,8 +370,8 @@ TEST_F(ContainerLoggerTest, LOGROTATE_RotateInSandbox)
   // one MB since there is also the executor's output besides the task's stdout.
   Try<Bytes> stdoutSize = os::stat::size(stdoutPath);
   ASSERT_SOME(stdoutSize);
-  EXPECT_LE(1024u, stdoutSize->kilobytes());
-  EXPECT_GE(1050u, stdoutSize->kilobytes());
+  EXPECT_LE(1024u, stdoutSize->bytes() / Bytes::KILOBYTES);
+  EXPECT_GE(1050u, stdoutSize->bytes() / Bytes::KILOBYTES);
 
   // We should only have files up to "stdout.4".
   stdoutPath = path::join(sandboxDirectory, "stdout.5");
@@ -368,8 +385,8 @@ TEST_F(ContainerLoggerTest, LOGROTATE_RotateInSandbox)
     // NOTE: The rotated files are written in contiguous blocks, meaning that
     // each file may be less than the maximum allowed size.
     stdoutSize = os::stat::size(stdoutPath);
-    EXPECT_LE(2040u, stdoutSize->kilobytes());
-    EXPECT_GE(2048u, stdoutSize->kilobytes());
+    EXPECT_LE(2040u, stdoutSize->bytes() / Bytes::KILOBYTES);
+    EXPECT_GE(2048u, stdoutSize->bytes() / Bytes::KILOBYTES);
   }
 }
 
@@ -391,13 +408,13 @@ TEST_F(ContainerLoggerTest, LOGROTATE_CustomRotateOptions)
   // Use the non-default container logger that rotates logs.
   flags.container_logger = LOGROTATE_CONTAINER_LOGGER_NAME;
 
-  Fetcher fetcher;
+  Fetcher fetcher(flags);
 
   // We use an actual containerizer + executor since we want something to run.
   Try<MesosContainerizer*> _containerizer =
     MesosContainerizer::create(flags, false, &fetcher);
 
-  CHECK_SOME(_containerizer);
+  ASSERT_SOME(_containerizer);
   Owned<MesosContainerizer> containerizer(_containerizer.get());
 
   Owned<MasterDetector> detector = master.get()->createDetector();
@@ -407,7 +424,7 @@ TEST_F(ContainerLoggerTest, LOGROTATE_CustomRotateOptions)
   ASSERT_SOME(slave);
 
   AWAIT_READY(slaveRegisteredMessage);
-  SlaveID slaveId = slaveRegisteredMessage.get().slave_id();
+  SlaveID slaveId = slaveRegisteredMessage->slave_id();
 
   MockScheduler sched;
   MesosSchedulerDriver driver(
@@ -427,9 +444,9 @@ TEST_F(ContainerLoggerTest, LOGROTATE_CustomRotateOptions)
   AWAIT_READY(frameworkId);
 
   AWAIT_READY(offers);
-  EXPECT_NE(0u, offers.get().size());
+  ASSERT_FALSE(offers->empty());
 
-  const std::string customConfig = "some-custom-logrotate-option";
+  const string customConfig = "some-custom-logrotate-option";
 
   TaskInfo task = createTask(offers.get()[0], "exit 0");
 
@@ -440,20 +457,25 @@ TEST_F(ContainerLoggerTest, LOGROTATE_CustomRotateOptions)
   variable->set_name("CONTAINER_LOGGER_LOGROTATE_STDOUT_OPTIONS");
   variable->set_value(customConfig);
 
+  Future<TaskStatus> statusStarting;
   Future<TaskStatus> statusRunning;
   Future<TaskStatus> statusFinished;
   EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&statusStarting))
     .WillOnce(FutureArg<1>(&statusRunning))
     .WillOnce(FutureArg<1>(&statusFinished))
     .WillRepeatedly(Return());       // Ignore subsequent updates.
 
   driver.launchTasks(offers.get()[0].id(), {task});
 
+  AWAIT_READY(statusStarting);
+  EXPECT_EQ(TASK_STARTING, statusStarting->state());
+
   AWAIT_READY(statusRunning);
-  EXPECT_EQ(TASK_RUNNING, statusRunning.get().state());
+  EXPECT_EQ(TASK_RUNNING, statusRunning->state());
 
   AWAIT_READY(statusFinished);
-  EXPECT_EQ(TASK_FINISHED, statusFinished.get().state());
+  EXPECT_EQ(TASK_FINISHED, statusFinished->state());
 
   driver.stop();
   driver.join();
@@ -474,7 +496,7 @@ TEST_F(ContainerLoggerTest, LOGROTATE_CustomRotateOptions)
   string stdoutPath = path::join(sandboxDirectory, "stdout.logrotate.conf");
   ASSERT_TRUE(os::exists(stdoutPath));
 
-  Try<std::string> stdoutConfig = os::read(stdoutPath);
+  Try<string> stdoutConfig = os::read(stdoutPath);
   ASSERT_SOME(stdoutConfig);
 
   ASSERT_TRUE(strings::contains(stdoutConfig.get(), customConfig));
@@ -498,13 +520,13 @@ TEST_F(ContainerLoggerTest, LOGROTATE_ModuleFDOwnership)
   // Use the non-default container logger that rotates logs.
   flags.container_logger = LOGROTATE_CONTAINER_LOGGER_NAME;
 
-  Fetcher fetcher;
+  Fetcher fetcher(flags);
 
   // We use an actual containerizer + executor since we want something to run.
   Try<MesosContainerizer*> _containerizer =
     MesosContainerizer::create(flags, false, &fetcher);
 
-  CHECK_SOME(_containerizer);
+  ASSERT_SOME(_containerizer);
   Owned<MesosContainerizer> containerizer(_containerizer.get());
 
   Owned<MasterDetector> detector = master.get()->createDetector();
@@ -514,7 +536,6 @@ TEST_F(ContainerLoggerTest, LOGROTATE_ModuleFDOwnership)
   ASSERT_SOME(slave);
 
   AWAIT_READY(slaveRegisteredMessage);
-  SlaveID slaveId = slaveRegisteredMessage.get().slave_id();
 
   MockScheduler sched;
   MesosSchedulerDriver driver(
@@ -534,38 +555,43 @@ TEST_F(ContainerLoggerTest, LOGROTATE_ModuleFDOwnership)
   AWAIT_READY(frameworkId);
 
   AWAIT_READY(offers);
-  EXPECT_NE(0u, offers.get().size());
+  ASSERT_FALSE(offers->empty());
 
   // Start a task that will keep running until the end of the test.
   TaskInfo task = createTask(offers.get()[0], "sleep 100");
 
+  Future<TaskStatus> statusStarting;
   Future<TaskStatus> statusRunning;
   Future<TaskStatus> statusKilled;
   EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&statusStarting))
     .WillOnce(FutureArg<1>(&statusRunning))
     .WillOnce(FutureArg<1>(&statusKilled))
     .WillRepeatedly(Return());       // Ignore subsequent updates.
 
   driver.launchTasks(offers.get()[0].id(), {task});
 
+  AWAIT_READY(statusStarting);
+  EXPECT_EQ(TASK_STARTING, statusStarting->state());
+
   AWAIT_READY(statusRunning);
-  EXPECT_EQ(TASK_RUNNING, statusRunning.get().state());
+  EXPECT_EQ(TASK_RUNNING, statusRunning->state());
 
   // Open multiple files, so that we're fairly certain we've opened
   // the same FDs (integers) opened by the container logger.
   vector<int> fds;
   for (int i = 0; i < 50; i++) {
-    Try<int> fd = os::open("/dev/null", O_RDONLY);
+    Try<int> fd = os::open(os::DEV_NULL, O_RDONLY);
     ASSERT_SOME(fd);
 
     fds.push_back(fd.get());
   }
 
   // Kill the task, which also kills the executor.
-  driver.killTask(statusRunning.get().task_id());
+  driver.killTask(statusRunning->task_id());
 
   AWAIT_READY(statusKilled);
-  EXPECT_EQ(TASK_KILLED, statusKilled.get().state());
+  EXPECT_EQ(TASK_KILLED, statusKilled->state());
 
   Future<Nothing> executorTerminated =
     FUTURE_DISPATCH(_, &Slave::executorTerminated);
@@ -623,13 +649,13 @@ TEST_P(UserContainerLoggerTest, ROOT_LOGROTATE_RotateWithSwitchUserTrueOrFalse)
       flags.work_dir, S_IRWXU | S_IRGRP | S_IXGRP | S_IROTH | S_IXOTH);
   ASSERT_SOME(chmod);
 
-  Fetcher fetcher;
+  Fetcher fetcher(flags);
 
   // We use an actual containerizer + executor since we want something to run.
   Try<MesosContainerizer*> _containerizer =
     MesosContainerizer::create(flags, false, &fetcher);
 
-  CHECK_SOME(_containerizer);
+  ASSERT_SOME(_containerizer);
   Owned<MesosContainerizer> containerizer(_containerizer.get());
 
   Owned<MasterDetector> detector = master.get()->createDetector();
@@ -639,7 +665,7 @@ TEST_P(UserContainerLoggerTest, ROOT_LOGROTATE_RotateWithSwitchUserTrueOrFalse)
   ASSERT_SOME(slave);
 
   AWAIT_READY(slaveRegisteredMessage);
-  SlaveID slaveId = slaveRegisteredMessage.get().slave_id();
+  SlaveID slaveId = slaveRegisteredMessage->slave_id();
 
   MockScheduler sched;
   MesosSchedulerDriver driver(
@@ -659,7 +685,7 @@ TEST_P(UserContainerLoggerTest, ROOT_LOGROTATE_RotateWithSwitchUserTrueOrFalse)
   AWAIT_READY(frameworkId);
 
   AWAIT_READY(offers);
-  EXPECT_NE(0u, offers.get().size());
+  ASSERT_FALSE(offers->empty());
 
   // Start a task that spams stdout with 3 MB of (mostly blank) output.
   // The logrotate container logger module is loaded with parameters that limit
@@ -674,20 +700,25 @@ TEST_P(UserContainerLoggerTest, ROOT_LOGROTATE_RotateWithSwitchUserTrueOrFalse)
   // Start the task as a non-root user.
   task.mutable_command()->set_user("nobody");
 
+  Future<TaskStatus> statusStarting;
   Future<TaskStatus> statusRunning;
   Future<TaskStatus> statusFinished;
   EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&statusStarting))
     .WillOnce(FutureArg<1>(&statusRunning))
     .WillOnce(FutureArg<1>(&statusFinished))
     .WillRepeatedly(Return());       // Ignore subsequent updates.
 
   driver.launchTasks(offers.get()[0].id(), {task});
 
+  AWAIT_READY(statusStarting);
+  EXPECT_EQ(TASK_STARTING, statusStarting->state());
+
   AWAIT_READY(statusRunning);
-  EXPECT_EQ(TASK_RUNNING, statusRunning.get().state());
+  EXPECT_EQ(TASK_RUNNING, statusRunning->state());
 
   AWAIT_READY(statusFinished);
-  EXPECT_EQ(TASK_FINISHED, statusFinished.get().state());
+  EXPECT_EQ(TASK_FINISHED, statusFinished->state());
 
   driver.stop();
   driver.join();
@@ -697,7 +728,7 @@ TEST_P(UserContainerLoggerTest, ROOT_LOGROTATE_RotateWithSwitchUserTrueOrFalse)
   // Once they finish reading the container's pipe, they should exit.
   Try<os::ProcessTree> pstrees = os::pstree(0);
   ASSERT_SOME(pstrees);
-  foreach (const os::ProcessTree& pstree, pstrees.get().children) {
+  foreach (const os::ProcessTree& pstree, pstrees->children) {
     // Wait for the logger subprocesses to exit, for up to 5 seconds each.
     Duration waited = Duration::zero();
     do {
@@ -752,8 +783,8 @@ TEST_P(UserContainerLoggerTest, ROOT_LOGROTATE_RotateWithSwitchUserTrueOrFalse)
   // one MB since there is also the executor's output besides the task's stdout.
   Try<Bytes> stdoutSize = os::stat::size(stdoutPath);
   ASSERT_SOME(stdoutSize);
-  EXPECT_LE(1024u, stdoutSize->kilobytes());
-  EXPECT_GE(1050u, stdoutSize->kilobytes());
+  EXPECT_LE(1024u, stdoutSize->bytes() / Bytes::KILOBYTES);
+  EXPECT_GE(1050u, stdoutSize->bytes() / Bytes::KILOBYTES);
 
   // We should only have files up to "stdout.1".
   stdoutPath = path::join(sandboxDirectory, "stdout.2");
@@ -767,9 +798,10 @@ TEST_P(UserContainerLoggerTest, ROOT_LOGROTATE_RotateWithSwitchUserTrueOrFalse)
   // each file may be less than the maximum allowed size.
   stdoutSize = os::stat::size(stdoutPath);
   ASSERT_SOME(stdoutSize);
-  EXPECT_LE(2040u, stdoutSize->kilobytes());
-  EXPECT_GE(2048u, stdoutSize->kilobytes());
+  EXPECT_LE(2040u, stdoutSize->bytes() / Bytes::KILOBYTES);
+  EXPECT_GE(2048u, stdoutSize->bytes() / Bytes::KILOBYTES);
 }
+#endif // __WINDOWS__
 
 } // namespace tests {
 } // namespace internal {

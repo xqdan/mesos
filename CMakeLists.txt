@@ -16,11 +16,15 @@
 
 # THE MESOS PROJECT.
 ####################
-cmake_minimum_required(VERSION 2.8)
+if (NOT WIN32)
+  cmake_minimum_required(VERSION 3.7.0)
+else ()
+  cmake_minimum_required(VERSION 3.8.0)
+endif ()
 
 project(Mesos)
 set(MESOS_MAJOR_VERSION 1)
-set(MESOS_MINOR_VERSION 2)
+set(MESOS_MINOR_VERSION 5)
 set(MESOS_PATCH_VERSION 0)
 set(PACKAGE_VERSION
   ${MESOS_MAJOR_VERSION}.${MESOS_MINOR_VERSION}.${MESOS_PATCH_VERSION})
@@ -28,87 +32,85 @@ set(PACKAGE_VERSION
 set(MESOS_PACKAGE_VERSION ${PACKAGE_VERSION})
 set(MESOS_PACKAGE_SOVERSION 0)
 
-# MESOS BUILD CONFIGURATION OPTIONS.
-####################################
-option(_DEBUG "Set default build configuration to debug" ON)
-option(VERBOSE "Enable verbose CMake statements and compilation output" TRUE)
-option(
-  REBUNDLED
-  "Build dependencies from tar.gz files in 3rdparty folder instead of downloading"
-  TRUE
-  )
-option(
-  ENABLE_LIBEVENT
-  "Use libevent instead of default libev as the core event loop implementation"
-  FALSE
-  )
-set(CMAKE_VERBOSE_MAKEFILE ${VERBOSE})
-set(
-  3RDPARTY_DEPENDENCIES "https://github.com/3rdparty/mesos-3rdparty/raw/master"
-  CACHE STRING "Pass in a URL or filesystem path that points at a mirror of the canonical third-party dependency repository (https://github.com/3rdparty/mesos-3rdparty); this will cause Mesos to build against the third-party tarballs we find in the mirror, instead of going to the Internet or building against the rebundled tarballs in the Mesos repository.\n\nThis is especially useful for Windows builds, because building on MSVC 1900 requires newer versions of ZK, glog, and libevent, than the ones rebundled in the Mesos repository, and so in that case we normally would have to go to the Internet to get them. Using this flag, however, means we can avoid this.\nNOTE: If you use this in conjunction with the `REBUNDLED` flag, then we will only go to this repository when we would go to the Internet normally; on most Unix builds, this will mean you never go to the Internet, but on Windows, it means you will in the case of glog, ZK, and libevent. To build purely against the mirror, do not use the `REBUNDLED` flag."
-  )
-
-if (REBUNDLED AND ENABLE_LIBEVENT)
-  message(
-    WARNING
-    "Both `ENABLE_LIBEVENT` and `REBUNDLED` (set to TRUE by default) flags "
-    "have been set. But, libevent does not come rebundled in Mesos, so it must "
-    "be downloaded."
-    )
-endif (REBUNDLED AND ENABLE_LIBEVENT)
-
-if (WIN32 AND REBUNDLED)
-  message(
-    WARNING
-    "The current supported version of ZK does not compile on Windows, and does "
-    "not come rebundled in the Mesos repository. It must be downloaded from "
-    "the Internet, even though the `REBUNDLED` flag was set."
-    )
-endif (WIN32 AND REBUNDLED)
-
-if (WIN32 AND (NOT ENABLE_LIBEVENT))
-  message(
-    FATAL_ERROR
-    "Windows builds of Mesos currently do not support libev, the default event "
-    "loop used by Mesos. To opt into using libevent, pass "
-    "`-DENABLE_LIBEVENT=1` as an argument when you run CMake. NOTE: although "
-    "the plan is to eventually transition to libevent, it is still in "
-    "experimental support, and the code path is much less well-exercised."
-    )
-endif (WIN32 AND (NOT ENABLE_LIBEVENT))
 
 # CMAKE MODULE SETUP.
 #####################
+# Paths that are searched when `include(...)` is called.
 list(APPEND CMAKE_MODULE_PATH ${CMAKE_SOURCE_DIR}/cmake)
 list(APPEND CMAKE_MODULE_PATH ${CMAKE_SOURCE_DIR}/3rdparty/cmake)
-list(APPEND CMAKE_MODULE_PATH ${CMAKE_SOURCE_DIR}/3rdparty/libprocess/cmake)
-list(APPEND CMAKE_MODULE_PATH ${CMAKE_SOURCE_DIR}/3rdparty/stout/cmake)
-list(
-  APPEND
-  CMAKE_MODULE_PATH ${CMAKE_SOURCE_DIR}/3rdparty/libprocess/cmake/macros)
 list(APPEND CMAKE_MODULE_PATH ${CMAKE_SOURCE_DIR}/src/cmake)
-list(APPEND CMAKE_MODULE_PATH ${CMAKE_SOURCE_DIR}/src/master/cmake)
-list(APPEND CMAKE_MODULE_PATH ${CMAKE_SOURCE_DIR}/src/slave/cmake)
-list(APPEND CMAKE_MODULE_PATH ${CMAKE_SOURCE_DIR}/src/tests/cmake)
 
 # Macros.
-include(Common)
-include(External)
-include(PatchCommand)
 include(Versions)
-include(VsBuildCommand)
+include(cotire)
 
 # Configuration.
 include(MesosConfigure)
 
+
 # SUBDIRECTORIES.
 #################
 add_subdirectory(3rdparty)
-
 add_subdirectory(src)
 
-add_custom_target(
-  check ${STOUT_TESTS_TARGET}
-  COMMAND ${PROCESS_TESTS_TARGET}
-  DEPENDS ${PROCESS_TESTS_TARGET} ${STOUT_TESTS_TARGET}
-  )
+
+# TESTS.
+########
+add_custom_target(check COMMAND ctest -V -C $<CONFIG> DEPENDS tests)
+add_custom_target(tests DEPENDS stout-tests libprocess-tests mesos-tests)
+
+# PACKAGING.
+############
+# List of sources we will ignore when generating a source package.
+# We assume there are no artifacts from an autotools build.
+#
+# NOTE: An in-source build is not supported. The build directory
+# must be different than the source directory.
+set(CPACK_SOURCE_IGNORE_FILES
+  .clang-format;
+  .gitignore;
+  .reviewboardrc;
+  bootstrap.bat;
+  bootstrap;
+  configure.ac;
+  Doxyfile;
+  mesos.pc.in;
+  /.git/;
+  /docs/;
+  /m4/;
+  /mpi/;
+  /site/;
+  /support/;
+  ${CMAKE_BINARY_DIR};)
+
+# Convert the ignore list to a string (as required by CPack).
+set(CPACK_SOURCE_IGNORE_FILES "${CPACK_SOURCE_IGNORE_FILES}")
+
+# Set the basename of any packages to 'mesos-<version>'.
+set(CPACK_PACKAGE_FILE_NAME "mesos-${MESOS_PACKAGE_VERSION}")
+set(CPACK_SOURCE_PACKAGE_FILE_NAME ${CPACK_PACKAGE_FILE_NAME})
+
+# By default, all forms of binary packages are disabled.
+option(CPACK_BINARY_BUNDLE       "Enable to build OSX bundles"              OFF)
+option(CPACK_BINARY_DEB          "Enable to build Debian packages"          OFF)
+option(CPACK_BINARY_DRAGNDROP    "Enable to build OSX Drag'n'Drop packages" OFF)
+option(CPACK_BINARY_IFW          "Enable to build IFW packages"             OFF)
+option(CPACK_BINARY_NSIS         "Enable to build NSIS packages"            OFF)
+option(CPACK_BINARY_OSXX11       "Enable to build OSX X11 packages"         OFF)
+option(CPACK_BINARY_PACKAGEMAKER "Enable to build PackageMaker packages"    OFF)
+option(CPACK_BINARY_RPM          "Enable to build RPM packages"             OFF)
+option(CPACK_BINARY_STGZ         "Enable to build STGZ packages"            OFF)
+option(CPACK_BINARY_TBZ2         "Enable to build TBZ2 packages"            OFF)
+option(CPACK_BINARY_TGZ          "Enable to build TGZ packages"             OFF)
+option(CPACK_BINARY_TXZ          "Enable to build TXZ packages"             OFF)
+
+# Output a gzip'd tarball for the `package_source` target.
+set(CPACK_SOURCE_TGZ ON)
+
+# By default, other forms of source packages are disabled.
+option(CPACK_SOURCE_TBZ2 "Enable to build TBZ2 source packages" OFF)
+option(CPACK_SOURCE_TXZ  "Enable to build TXZ source packages"  OFF)
+option(CPACK_SOURCE_TZ   "Enable to build TZ source packages"   OFF)
+option(CPACK_SOURCE_ZIP  "Enable to build ZIP source packages"  OFF)
+
+include(CPack)

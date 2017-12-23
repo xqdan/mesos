@@ -185,6 +185,8 @@ void tick(const Time& time)
 
   (*clock::callback)(timedout);
 
+  timedout.clear();
+
   // Mark 'settling' as false since there are not any more timers
   // that will expire before the paused time and we've finished
   // executing expired timers.
@@ -376,7 +378,7 @@ void Clock::advance(const Duration& duration)
       *clock::advanced += duration;
       *clock::current += duration;
 
-      VLOG(2) << "Clock advanced ("  << duration << ") to " << *clock::current;
+      VLOG(2) << "Clock advanced (" << duration << ") to " << *clock::current;
 
       // Schedule another "tick" if necessary. Only "ticks" that
       // fire immediately will be scheduled here, since the clock

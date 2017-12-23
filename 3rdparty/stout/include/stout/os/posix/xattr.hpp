@@ -13,7 +13,18 @@
 #ifndef __STOUT_OS_POSIX_XATTR_HPP__
 #define __STOUT_OS_POSIX_XATTR_HPP__
 
+#ifdef __FreeBSD__
+#include <sys/types.h>
+#include <sys/extattr.h>
+#else
 #include <sys/xattr.h>
+#endif
+
+#include <string>
+
+#include <stout/error.hpp>
+#include <stout/nothing.hpp>
+#include <stout/try.hpp>
 
 namespace os {
 
@@ -31,6 +42,13 @@ inline Try<Nothing> setxattr(
       value.length(),
       0,
       flags) < 0) {
+#elif __FreeBSD__
+  if (::extattr_set_file(
+        path.c_str(),
+        EXTATTR_NAMESPACE_USER,
+        name.c_str(),
+        value.c_str(),
+        value.length()) < 0) {
 #else
   if (::setxattr(
         path.c_str(),
@@ -53,6 +71,12 @@ inline Try<std::string> getxattr(
   // Get the current size of the attribute.
 #ifdef __APPLE__
   ssize_t size = ::getxattr(path.c_str(), name.c_str(), nullptr, 0, 0, 0);
+#elif __FreeBSD__
+  ssize_t size = ::extattr_get_file(path.c_str(),
+                                    EXTATTR_NAMESPACE_USER,
+                                    name.c_str(),
+                                    nullptr,
+                                    0);
 #else
   ssize_t size = ::getxattr(path.c_str(), name.c_str(), nullptr, 0);
 #endif
@@ -65,6 +89,13 @@ inline Try<std::string> getxattr(
 
 #ifdef __APPLE__
   if (::getxattr(path.c_str(), name.c_str(), temp, (size_t)size, 0, 0) < 0) {
+#elif __FreeBSD__
+  if (::extattr_get_file(
+              path.c_str(),
+              EXTATTR_NAMESPACE_USER,
+              name.c_str(),
+              temp,
+              (size_t)size) < 0) {
 #else
   if (::getxattr(path.c_str(), name.c_str(), temp, (size_t)size) < 0) {
 #endif
@@ -85,6 +116,10 @@ inline Try<Nothing> removexattr(
 {
 #ifdef __APPLE__
   if (::removexattr(path.c_str(), name.c_str(), 0) < 0) {
+#elif __FreeBSD__
+  if (::extattr_delete_file(path.c_str(),
+                            EXTATTR_NAMESPACE_USER,
+                            name.c_str())) {
 #else
   if (::removexattr(path.c_str(), name.c_str()) < 0) {
 #endif

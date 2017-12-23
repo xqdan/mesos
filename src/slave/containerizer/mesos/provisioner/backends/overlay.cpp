@@ -23,6 +23,8 @@
 #include <stout/fs.hpp>
 #include <stout/os.hpp>
 
+#include <stout/os/realpath.hpp>
+
 #include "linux/fs.hpp"
 
 #include "slave/containerizer/mesos/provisioner/backends/overlay.hpp"
@@ -63,17 +65,8 @@ public:
 
 Try<Owned<Backend>> OverlayBackend::create(const Flags&)
 {
-  Result<string> user = os::user();
-  if (!user.isSome()) {
-    return Error(
-        "Failed to determine user: " +
-        (user.isError() ? user.error() : "username not found"));
-  }
-
-  if (user.get() != "root") {
-    return Error(
-      "OverlayBackend requires root privileges, "
-      "but is running as user " + user.get());
+  if (geteuid() != 0) {
+    return Error("OverlayBackend requires root privileges");
   }
 
   return Owned<Backend>(new OverlayBackend(
@@ -108,6 +101,7 @@ Future<Nothing> OverlayBackend::provision(
       backendDir);
 }
 
+
 Future<bool> OverlayBackend::destroy(
     const string& rootfs,
     const string& backendDir)
@@ -136,8 +130,8 @@ Future<Nothing> OverlayBackendProcess::provision(
         rootfs + "': " + mkdir.error());
   }
 
-  const string scratchDirId = Path(rootfs).basename();
-  const string scratchDir = path::join(backendDir, "scratch", scratchDirId);
+  const string rootfsId = Path(rootfs).basename();
+  const string scratchDir = path::join(backendDir, "scratch", rootfsId);
   const string upperdir = path::join(scratchDir,  "upperdir");
   const string workdir = path::join(scratchDir, "workdir");
 
@@ -164,12 +158,13 @@ Future<Nothing> OverlayBackendProcess::provision(
   }
 
   const string tempDir = mktemp.get();
-  const string tempLink = path::join(backendDir, "links");
+  const string tempLink = path::join(scratchDir, "links");
 
   Try<Nothing> symlink = ::fs::symlink(tempDir, tempLink);
   if (symlink.isError()) {
     return Failure(
-        "Failed to create symlink '" + tempLink + "' -> '" + tempDir + "'");
+        "Failed to create symlink '" + tempLink +
+        "' -> '" + tempDir + "': " + symlink.error());
   }
 
   VLOG(1) << "Created symlink '" << tempLink << "' -> '" << tempDir << "'";
@@ -273,13 +268,14 @@ Future<bool> OverlayBackendProcess::destroy(
       }
 
       // Clean up tempDir used for image layer links.
-      const string tempLink = path::join(backendDir, "links");
+      const string tempLink = path::join(
+          backendDir, "scratch", Path(rootfs).basename(), "links");
 
       if (!os::exists(tempLink)) {
         // TODO(zhitao): This should be converted into a failure after
         // deprecation cycle started by 1.1.0.
         VLOG(1) << "Cannot find symlink to temporary directory '" << tempLink
-                <<"' for image links";
+                << "' for image links";
 
         return true;
       }

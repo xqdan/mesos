@@ -42,10 +42,11 @@ namespace mesos {
 namespace internal {
 namespace log {
 
-static bool isRejectedPromise(const PromiseResponse& response) {
+static bool isRejectedPromise(const PromiseResponse& response)
+{
   if (response.has_type()) {
     // New format (Mesos >= 0.26).
-    return response.type() ==  PromiseResponse::REJECT;
+    return response.type() == PromiseResponse::REJECT;
   } else {
     // Old format (Mesos < 0.26).
     return !response.okay();
@@ -53,7 +54,8 @@ static bool isRejectedPromise(const PromiseResponse& response) {
 }
 
 
-static bool isRejectedWrite(const WriteResponse& response) {
+static bool isRejectedWrite(const WriteResponse& response)
+{
   if (response.has_type()) {
     // New format (Mesos >= 0.26).
     return response.type() == WriteResponse::REJECT;
@@ -149,7 +151,8 @@ private:
 
   void received(const PromiseResponse& response)
   {
-    if (response.has_type() && response.type() == PromiseResponse::IGNORE) {
+    if (response.has_type() && response.type() ==
+        PromiseResponse::IGNORED) {
       ignoresReceived++;
 
       // A quorum of replicas have ignored the request.
@@ -157,10 +160,10 @@ private:
         LOG(INFO) << "Aborting explicit promise request because "
                   << ignoresReceived << " ignores received";
 
-        // If the "type" is PromiseResponse::IGNORE, the rest of the
+        // If the "type" is PromiseResponse::IGNORED, the rest of the
         // fields don't matter.
         PromiseResponse result;
-        result.set_type(PromiseResponse::IGNORE);
+        result.set_type(PromiseResponse::IGNORED);
 
         promise.set(result);
         terminate(self());
@@ -352,7 +355,8 @@ private:
 
   void received(const PromiseResponse& response)
   {
-    if (response.has_type() && response.type() == PromiseResponse::IGNORE) {
+    if (response.has_type() && response.type() ==
+        PromiseResponse::IGNORED) {
       ignoresReceived++;
 
       // A quorum of replicas have ignored the request.
@@ -360,10 +364,10 @@ private:
         LOG(INFO) << "Aborting implicit promise request because "
                   << ignoresReceived << " ignores received";
 
-        // If the "type" is PromiseResponse::IGNORE, the rest of the
+        // If the "type" is PromiseResponse::IGNORED, the rest of the
         // fields don't matter.
         PromiseResponse result;
-        result.set_type(PromiseResponse::IGNORE);
+        result.set_type(PromiseResponse::IGNORED);
 
         promise.set(result);
         terminate(self());
@@ -536,17 +540,18 @@ private:
   {
     CHECK_EQ(response.position(), request.position());
 
-    if (response.has_type() && response.type() == WriteResponse::IGNORE) {
+    if (response.has_type() && response.type() ==
+        WriteResponse::IGNORED) {
       ignoresReceived++;
 
       if (ignoresReceived >= quorum) {
         LOG(INFO) << "Aborting write request because "
                   << ignoresReceived << " ignores received";
 
-        // If the "type" is WriteResponse::IGNORE, the rest of the
+        // If the "type" is WriteResponse::IGNORED, the rest of the
         // fields don't matter.
         WriteResponse result;
-        result.set_type(WriteResponse::IGNORE);
+        result.set_type(WriteResponse::IGNORED);
 
         promise.set(result);
         terminate(self());

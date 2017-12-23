@@ -17,6 +17,7 @@
 #ifndef __SLAVE_FLAGS_HPP__
 #define __SLAVE_FLAGS_HPP__
 
+#include <cstdint>
 #include <string>
 
 #include <stout/bytes.hpp>
@@ -44,11 +45,16 @@ public:
   Option<std::string> hostname;
   bool hostname_lookup;
   Option<std::string> resources;
+  Option<std::string> resource_provider_config_dir;
+#ifdef ENABLE_GRPC
+  Option<std::string> volume_profile_adaptor;
+#endif
   std::string isolation;
   std::string launcher;
 
   Option<std::string> image_providers;
-  std::string image_provisioner_backend;
+  Option<std::string> image_provisioner_backend;
+  Option<ImageGcConfig> image_gc_config;
 
   std::string appc_simple_discovery_uri_prefix;
   std::string appc_store_dir;
@@ -69,20 +75,26 @@ public:
 
 #ifndef __WINDOWS__
   bool switch_user;
-  bool io_switchboard_enable_server;
 #endif // __WINDOWS__
+  Duration http_heartbeat_interval;
   std::string frameworks_home;  // TODO(benh): Make an Option.
   Duration registration_backoff_factor;
   Duration authentication_backoff_factor;
   Option<JSON::Object> executor_environment_variables;
   Duration executor_registration_timeout;
+  Duration executor_reregistration_timeout;
+  Option<Duration> executor_reregistration_retry_interval;
   Duration executor_shutdown_grace_period;
+#ifdef USE_SSL_SOCKET
+  Option<Path> jwt_secret_key;
+#endif // USE_SSL_SOCKET
   Duration gc_delay;
   double gc_disk_headroom;
   Duration disk_watch_interval;
 
   Option<std::string> container_logger;
 
+  std::string reconfiguration_policy;
   std::string recover;
   Duration recovery_timeout;
   bool strict;
@@ -95,6 +107,7 @@ public:
   bool cgroups_cpu_enable_pids_and_tids_count;
   Option<std::string> cgroups_net_cls_primary_handle;
   Option<std::string> cgroups_net_cls_secondary_handles;
+  Option<DeviceWhitelist> allowed_devices;
   Option<std::string> agent_subsystems;
   Option<std::vector<unsigned int>> nvidia_gpu_devices;
   Option<std::string> perf_events;
@@ -103,7 +116,9 @@ public:
   bool revocable_cpu_low_priority;
   bool systemd_enable_support;
   std::string systemd_runtime_directory;
-  Option<CapabilityInfo> allowed_capabilities;
+  Option<CapabilityInfo> effective_capabilities;
+  Option<CapabilityInfo> bounding_capabilities;
+  bool disallow_sharing_agent_pid_namespace;
 #endif
   Option<Firewall> firewall_rules;
   Option<Path> credential;
@@ -113,6 +128,7 @@ public:
   Option<std::string> docker_mesos_image;
   Duration docker_remove_delay;
   std::string sandbox_directory;
+  Option<ContainerDNSInfo> default_container_dns;
   Option<ContainerInfo> default_container_info;
 
   // TODO(alexr): Remove this after the deprecation cycle (started in 1.0).
@@ -122,7 +138,7 @@ public:
   std::string docker_socket;
   Option<JSON::Object> docker_config;
 
-#ifdef WITH_NETWORK_ISOLATOR
+#ifdef ENABLE_PORT_MAPPING_ISOLATOR
   uint16_t ephemeral_ports_per_container;
   Option<std::string> eth0_name;
   Option<std::string> lo_name;
@@ -132,7 +148,13 @@ public:
   bool network_enable_socket_statistics_summary;
   bool network_enable_socket_statistics_details;
   bool network_enable_snmp_statistics;
-#endif
+#endif // ENABLE_PORT_MAPPING_ISOLATOR
+
+#ifdef ENABLE_NETWORK_PORTS_ISOLATOR
+  Duration container_ports_watch_interval;
+  bool check_agent_port_range_only;
+#endif // ENABLE_NETWORK_PORTS_ISOLATOR
+
   Option<std::string> network_cni_plugins_dir;
   Option<std::string> network_cni_config_dir;
   Duration container_disk_watch_interval;
@@ -141,11 +163,15 @@ public:
   Option<std::string> modulesDir;
   std::string authenticatee;
   std::string authorizer;
-  std::string http_authenticators;
+  Option<std::string> http_authenticators;
   bool authenticate_http_readonly;
   bool authenticate_http_readwrite;
+#ifdef USE_SSL_SOCKET
+  bool authenticate_http_executors;
+#endif // USE_SSL_SOCKET
   Option<Path> http_credentials;
   Option<std::string> hooks;
+  Option<std::string> secret_resolver;
   Option<std::string> resource_estimator;
   Option<std::string> qos_controller;
   Duration qos_correction_interval_min;
@@ -155,6 +181,38 @@ public:
   std::string xfs_project_range;
 #endif
   bool http_command_executor;
+  Option<SlaveCapabilities> agent_features;
+  Option<DomainInfo> domain;
+
+  // The following flags are executable specific (e.g., since we only
+  // have one instance of libprocess per execution, we only want to
+  // advertise the IP and port option once, here).
+
+  Option<std::string> ip;
+  uint16_t port;
+  Option<std::string> advertise_ip;
+  Option<std::string> advertise_port;
+  Option<std::string> master;
+
+  Duration zk_session_timeout;
+
+  // Optional IP discover script that will set the slave's IP.
+  // If set, its output is expected to be a valid parseable IP string.
+  Option<std::string> ip_discovery_command;
+
+  // IPv6 flags.
+  //
+  // NOTE: These IPv6 flags are currently input mechanisms
+  // for the operator to specify v6 addresses on which containers
+  // running on host network can listen. Mesos itself doesn't listen
+  // or communicate over v6 addresses at this point.
+  Option<std::string> ip6;
+
+  // Similar to the `ip_discovery_command` this optional discover
+  // script is expected to output a valid IPv6 string. Only one of the
+  // two options `ip6` or `ip6_discovery_command` can be set at any
+  // given point of time.
+  Option<std::string> ip6_discovery_command;
 };
 
 } // namespace slave {

@@ -16,27 +16,10 @@
 
 # TODO(josephw): Enable this on Windows after sorting out the dependencies.
 if (NOT WIN32)
-
-set(MESOS_LOCAL_TARGET mesos-local
-  CACHE STRING "Used to start a local mesos cluster for testing purposes.")
-
-# THE MESOS-LOCAL SOURCE.
-#########################
-set(MESOS_LOCAL_SRC
-  ${MESOS_LOCAL_SRC}
-  main.cpp
-  )
-
-# THE MESOS LOCAL EXECUTABLE.
-#############################
-add_executable(${MESOS_LOCAL_TARGET} ${MESOS_LOCAL_SRC})
-
-# ADD LINKER FLAGS (generates, e.g., -lglog on Linux).
-######################################################
-target_link_libraries(${MESOS_LOCAL_TARGET} ${MESOS_TARGET})
-
-# ADD BINARY DEPENDENCIES (tells CMake what to compile/build first).
-####################################################################
-add_dependencies(${MESOS_LOCAL_TARGET} ${MESOS_TARGET})
-
-endif (NOT WIN32)
+  # THE MESOS LOCAL EXECUTABLE.
+  # Used to start a local mesos cluster for testing purposes.
+  ###########################################################
+  add_executable(mesos-local main.cpp)
+  target_link_libraries(mesos-local PRIVATE mesos)
+  add_dependencies(mesos-local mesos-agent mesos-master)
+endif ()

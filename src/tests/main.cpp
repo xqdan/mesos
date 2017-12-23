@@ -25,6 +25,8 @@
 #include <stout/os.hpp>
 #include <stout/try.hpp>
 
+#include <stout/os/socket.hpp> // For `wsa_*` on Windows.
+
 #include "logging/logging.hpp"
 
 #include "messages/messages.hpp" // For GOOGLE_PROTOBUF_VERIFY_VERSION.
@@ -45,27 +47,73 @@ using std::endl;
 using std::string;
 
 
+#ifdef __WINDOWS__
+// A no-op parameter validator. We use this to prevent the Windows
+// implementation of the C runtime from calling `abort` during our test suite.
+// See comment in `main.cpp`.
+static void noop_invalid_parameter_handler(
+    const wchar_t* expression,
+    const wchar_t* function,
+    const wchar_t* file,
+    unsigned int line,
+    uintptr_t reserved)
+{
+  return;
+}
+#endif // __WINDOWS__
+
+
 int main(int argc, char** argv)
 {
+#ifdef __WINDOWS__
+  if (!net::wsa_initialize()) {
+    cerr << "WSA failed to initialize" << endl;
+    return EXIT_FAILURE;
+  }
+
+  // When we're running a debug build, the Windows implementation of the C
+  // runtime will validate parameters passed to C-standard functions like
+  // `::close`. When we are in debug mode, if a parameter is invalid, the
+  // handler will usually call `abort`, rather than populating `errno` and
+  // returning an error value. Since we expect some tests to pass invalid
+  // paramaters to these functions, we disable this for testing.
+  _set_invalid_parameter_handler(noop_invalid_parameter_handler);
+#endif // __WINDOWS__
+
   GOOGLE_PROTOBUF_VERIFY_VERSION;
 
-  using mesos::internal::tests::flags; // Needed to disabmiguate.
+  using mesos::internal::tests::flags; // Needed to disambiguate.
 
   // Load flags from environment and command line but allow unknown
   // flags (since we might have gtest/gmock flags as well).
   Try<flags::Warnings> load = flags.load("MESOS_", argc, argv, true);
+
+  if (flags.help) {
+    cout << flags.usage() << endl;
+    testing::InitGoogleMock(&argc, argv); // Get usage from gtest too.
+    return EXIT_SUCCESS;
+  }
 
   if (load.isError()) {
     cerr << flags.usage(load.error()) << endl;
     return EXIT_FAILURE;
   }
 
-  if (flags.help) {
-    cout << flags.usage() << endl;
-    testing::InitGoogleTest(&argc, argv); // Get usage from gtest too.
-    return EXIT_SUCCESS;
+  // Be quiet by default!
+  if (!flags.verbose) {
+    flags.quiet = true;
   }
 
+  // Initialize logging.
+  logging::initialize(argv[0], true, flags);
+
+  // Log any flag warnings (after logging is initialized).
+  foreach (const flags::Warning& warning, load->warnings) {
+    LOG(WARNING) << warning.message;
+  }
+
+// TODO(josephw): Modules are not supported on Windows (MESOS-5994).
+#ifndef __WINDOWS__
   // Initialize Modules.
   if (flags.modules.isSome() && flags.modulesDir.isSome()) {
     EXIT(EXIT_FAILURE) <<
@@ -82,9 +130,9 @@ int main(int argc, char** argv)
 
   Try<Nothing> result = tests::initModules(flags.modules);
   if (result.isError()) {
-    cerr << "Error initializing modules: " << result.error() << endl;
-    return EXIT_FAILURE;
+    EXIT(EXIT_FAILURE) << "Error initializing modules: " << result.error();
   }
+#endif // __WINDOWS__
 
   // Disable /metrics/snapshot rate limiting, but do not
   // overwrite whatever the user set.
@@ -101,31 +149,38 @@ int main(int argc, char** argv)
                        << "`main()` was not the function's first invocation";
   }
 
-  // Be quiet by default!
-  if (!flags.verbose) {
-    flags.quiet = true;
-  }
-
-  // Initialize logging.
-  logging::initialize(argv[0], flags, true);
-
-  // Log any flag warnings (after logging is initialized).
-  foreach (const flags::Warning& warning, load->warnings) {
-    LOG(WARNING) << warning.message;
-  }
-
   // Initialize gmock/gtest.
-  testing::InitGoogleTest(&argc, argv);
+  testing::InitGoogleMock(&argc, argv);
   testing::FLAGS_gtest_death_test_style = "threadsafe";
 
-  cout << "Source directory: " << flags.source_dir << endl;
-  cout << "Build directory: " << flags.build_dir << endl;
+  LOG(INFO) << "Source directory: " << flags.source_dir;
+  LOG(INFO) << "Build directory: " << flags.build_dir;
 
   // Instantiate our environment. Note that it will be managed by
   // gtest after we add it via testing::AddGlobalTestEnvironment.
-  environment = new Environment(flags);
+  environment = new tests::Environment(flags);
 
   testing::AddGlobalTestEnvironment(environment);
 
-  return RUN_ALL_TESTS();
+  const int test_results = RUN_ALL_TESTS();
+
+  // Tear down the libprocess server sockets before we try to clean up the
+  // Windows WSA stack. If we don't, this will cause worker threads to crash
+  // the program on its way out.
+  process::finalize();
+
+  // Prefer to return the error code from the test run over the error code
+  // from the WSA teardown. That is: if the test run failed, return that error
+  // code; but, if the tests passed, we still want to return an error if the
+  // WSA teardown failed. If both succeeded, return 0.
+  const bool teardown_failed =
+#ifdef __WINDOWS__
+    !net::wsa_cleanup();
+#else
+    false;
+#endif // __WINDOWS__
+
+  return test_results > 0
+    ? test_results
+    : teardown_failed;
 }

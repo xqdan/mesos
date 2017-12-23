@@ -68,12 +68,59 @@ using testing::_;
 using testing::AtMost;
 using testing::DoAll;
 using testing::Return;
+using ::testing::InSequence;
 
 namespace mesos {
 namespace internal {
 namespace tests {
 
 class MesosSchedulerDriverTest : public MesosTest {};
+
+
+// Ensures that the scheduler driver can backoff correctly when
+// framework failover time is set to zero.
+TEST_F(MesosSchedulerDriverTest, RegistrationWithZeroFailoverTime)
+{
+  Try<Owned<cluster::Master>> master = StartMaster();
+  ASSERT_SOME(master);
+
+  FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
+  frameworkInfo.set_failover_timeout(0);
+
+  MockScheduler sched;
+  MesosSchedulerDriver driver(
+      &sched, frameworkInfo, master.get()->pid, DEFAULT_CREDENTIAL);
+
+  Clock::pause();
+
+  {
+    InSequence inSequence;
+
+    // Drop the first SUBSCRIBE call so that the driver retries.
+    DROP_CALL(
+        mesos::scheduler::Call(),
+        mesos::scheduler::Call::SUBSCRIBE,
+        _,
+        master.get()->pid);
+
+    // Settling the clock ensures that if a retried SUBSCRIBE
+    // call is enqueued it will be processed. Since the backoff
+    // is non-zero no new SUBSCRIBE call should be sent when
+    // the clock is paused.
+    EXPECT_NO_FUTURE_CALLS(
+        mesos::scheduler::Call(),
+        mesos::scheduler::Call::SUBSCRIBE,
+        _,
+        master.get()->pid);
+  }
+
+  driver.start();
+
+  Clock::settle();
+
+  driver.stop();
+  driver.join();
+}
 
 
 TEST_F(MesosSchedulerDriverTest, MetricsEndpoint)
@@ -99,7 +146,7 @@ TEST_F(MesosSchedulerDriverTest, MetricsEndpoint)
   AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response);
   AWAIT_EXPECT_RESPONSE_HEADER_EQ(APPLICATION_JSON, "Content-Type", response);
 
-  Try<JSON::Object> parse = JSON::parse<JSON::Object>(response.get().body);
+  Try<JSON::Object> parse = JSON::parse<JSON::Object>(response->body);
 
   ASSERT_SOME(parse);
 
@@ -156,7 +203,7 @@ TEST_F(MesosSchedulerDriverTest, DropAckIfStopCalledBeforeAbort)
   EXPECT_NO_FUTURE_CALLS(
       mesos::scheduler::Call(),
       mesos::scheduler::Call::ACKNOWLEDGE,
-      _ ,
+      _,
       master.get()->pid);
 
   EXPECT_CALL(exec, registered(_, _, _, _));
@@ -221,7 +268,7 @@ TEST_F(MesosSchedulerDriverTest, ExplicitAcknowledgements)
   EXPECT_NO_FUTURE_CALLS(
       mesos::scheduler::Call(),
       mesos::scheduler::Call::ACKNOWLEDGE,
-      _ ,
+      _,
       master.get()->pid);
 
   EXPECT_CALL(exec, registered(_, _, _, _));
@@ -290,13 +337,13 @@ TEST_F(MesosSchedulerDriverTest, ExplicitAcknowledgementsMasterGeneratedUpdate)
   EXPECT_NO_FUTURE_CALLS(
       mesos::scheduler::Call(),
       mesos::scheduler::Call::ACKNOWLEDGE,
-      _ ,
+      _,
       master.get()->pid);
 
   driver.start();
 
   AWAIT_READY(offers);
-  EXPECT_NE(0u, offers.get().size());
+  ASSERT_FALSE(offers->empty());
 
   // Launch a task using no resources.
   TaskInfo task;
@@ -315,9 +362,9 @@ TEST_F(MesosSchedulerDriverTest, ExplicitAcknowledgementsMasterGeneratedUpdate)
   driver.launchTasks(offers.get()[0].id(), tasks);
 
   AWAIT_READY(status);
-  ASSERT_EQ(TASK_ERROR, status.get().state());
-  ASSERT_EQ(TaskStatus::SOURCE_MASTER, status.get().source());
-  ASSERT_EQ(TaskStatus::REASON_TASK_INVALID, status.get().reason());
+  ASSERT_EQ(TASK_ERROR, status->state());
+  ASSERT_EQ(TaskStatus::SOURCE_MASTER, status->source());
+  ASSERT_EQ(TaskStatus::REASON_TASK_INVALID, status->reason());
 
   // Now send the acknowledgement.
   driver.acknowledgeStatusUpdate(status.get());
@@ -357,7 +404,7 @@ TEST_F(MesosSchedulerDriverTest, ExplicitAcknowledgementsUnsetSlaveID)
   EXPECT_NO_FUTURE_CALLS(
       mesos::scheduler::Call(),
       mesos::scheduler::Call::ACKNOWLEDGE,
-      _ ,
+      _,
       master.get()->pid);
 
   driver.start();
@@ -380,10 +427,10 @@ TEST_F(MesosSchedulerDriverTest, ExplicitAcknowledgementsUnsetSlaveID)
   driver.reconcileTasks(statuses);
 
   AWAIT_READY(update);
-  ASSERT_EQ(TASK_LOST, update.get().state());
-  ASSERT_EQ(TaskStatus::SOURCE_MASTER, update.get().source());
-  ASSERT_EQ(TaskStatus::REASON_RECONCILIATION, update.get().reason());
-  ASSERT_FALSE(update.get().has_slave_id());
+  ASSERT_EQ(TASK_LOST, update->state());
+  ASSERT_EQ(TaskStatus::SOURCE_MASTER, update->source());
+  ASSERT_EQ(TaskStatus::REASON_RECONCILIATION, update->reason());
+  ASSERT_FALSE(update->has_slave_id());
 
   // Now send the acknowledgement.
   driver.acknowledgeStatusUpdate(update.get());

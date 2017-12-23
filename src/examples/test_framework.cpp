@@ -32,6 +32,8 @@
 #include <stout/path.hpp>
 #include <stout/stringify.hpp>
 
+#include <stout/os/realpath.hpp>
+
 #include "logging/flags.hpp"
 #include "logging/logging.hpp"
 
@@ -50,6 +52,12 @@ using mesos::Resources;
 
 const int32_t CPUS_PER_TASK = 1;
 const int32_t MEM_PER_TASK = 128;
+
+constexpr char EXECUTOR_BINARY[] = "test-executor";
+constexpr char EXECUTOR_NAME[] = "Test Executor (C++)";
+constexpr char FRAMEWORK_NAME[] = "Test Framework (C++)";
+constexpr char FRAMEWORK_PRINCIPAL[] = "test-framework-cpp";
+
 
 class TestScheduler : public Scheduler
 {
@@ -85,16 +93,17 @@ public:
       cout << "Received offer " << offer.id() << " with " << offer.resources()
            << endl;
 
-      static const Resources TASK_RESOURCES = Resources::parse(
+      Resources taskResources = Resources::parse(
           "cpus:" + stringify(CPUS_PER_TASK) +
           ";mem:" + stringify(MEM_PER_TASK)).get();
+      taskResources.allocate(role);
 
       Resources remaining = offer.resources();
 
       // Launch tasks.
       vector<TaskInfo> tasks;
       while (tasksLaunched < totalTasks &&
-             remaining.flatten().contains(TASK_RESOURCES)) {
+             remaining.toUnreserved().contains(taskResources)) {
         int taskId = tasksLaunched++;
 
         cout << "Launching task " << taskId << " using offer "
@@ -106,9 +115,17 @@ public:
         task.mutable_slave_id()->MergeFrom(offer.slave_id());
         task.mutable_executor()->MergeFrom(executor);
 
-        Try<Resources> flattened = TASK_RESOURCES.flatten(role);
-        CHECK_SOME(flattened);
-        Option<Resources> resources = remaining.find(flattened.get());
+        Option<Resources> resources = [&]() {
+          if (role == "*") {
+            return remaining.find(taskResources);
+          }
+
+          Resource::ReservationInfo reservation;
+          reservation.set_type(Resource::ReservationInfo::STATIC);
+          reservation.set_role(role);
+
+          return remaining.find(taskResources.pushReservation(reservation));
+        }();
 
         CHECK_SOME(resources);
         task.mutable_resources()->MergeFrom(resources.get());
@@ -121,8 +138,8 @@ public:
     }
   }
 
-  virtual void offerRescinded(SchedulerDriver* driver,
-                              const OfferID& offerId) {}
+  virtual void offerRescinded(SchedulerDriver* driver, const OfferID& offerId)
+  {}
 
   virtual void statusUpdate(SchedulerDriver* driver, const TaskStatus& status)
   {
@@ -141,8 +158,7 @@ public:
            << " is in unexpected state " << status.state()
            << " with reason " << status.reason()
            << " from source " << status.source()
-           << " with message '" << status.message() << "'"
-           << endl;
+           << " with message '" << status.message() << "'" << endl;
       driver->abort();
     }
 
@@ -155,17 +171,21 @@ public:
     }
   }
 
-  virtual void frameworkMessage(SchedulerDriver* driver,
-                                const ExecutorID& executorId,
-                                const SlaveID& slaveId,
-                                const string& data) {}
+  virtual void frameworkMessage(
+      SchedulerDriver* driver,
+      const ExecutorID& executorId,
+      const SlaveID& slaveId,
+      const string& data)
+  {}
 
   virtual void slaveLost(SchedulerDriver* driver, const SlaveID& sid) {}
 
-  virtual void executorLost(SchedulerDriver* driver,
-                            const ExecutorID& executorID,
-                            const SlaveID& slaveID,
-                            int status) {}
+  virtual void executorLost(
+      SchedulerDriver* driver,
+      const ExecutorID& executorID,
+      const SlaveID& slaveID,
+      int status)
+  {}
 
   virtual void error(SchedulerDriver* driver, const string& message)
   {
@@ -191,7 +211,7 @@ void usage(const char* argv0, const flags::FlagsBase& flags)
 }
 
 
-class Flags : public mesos::internal::logging::Flags
+class Flags : public virtual mesos::internal::logging::Flags
 {
 public:
   Flags()
@@ -211,28 +231,32 @@ int main(int argc, char** argv)
   string uri;
   Option<string> value = os::getenv("MESOS_HELPER_DIR");
   if (value.isSome()) {
-    uri = path::join(value.get(), "test-executor");
+    uri = path::join(value.get(), EXECUTOR_BINARY);
   } else {
-    uri = path::join(
-        os::realpath(Path(argv[0]).dirname()).get(),
-        "test-executor");
+    uri =
+      path::join(os::realpath(Path(argv[0]).dirname()).get(), EXECUTOR_BINARY);
   }
 
   Flags flags;
 
   Try<flags::Warnings> load = flags.load(None(), argc, argv);
 
-  if (load.isError()) {
-    cerr << load.error() << endl;
-    usage(argv[0], flags);
-    exit(EXIT_FAILURE);
-  } else if (flags.master.isNone()) {
-    cerr << "Missing --master" << endl;
-    usage(argv[0], flags);
-    exit(EXIT_FAILURE);
+  if (flags.help) {
+    cout << flags.usage() << endl;
+    return EXIT_SUCCESS;
   }
 
-  internal::logging::initialize(argv[0], flags, true); // Catch signals.
+  if (load.isError()) {
+    cerr << flags.usage(load.error()) << endl;
+    return EXIT_FAILURE;
+  }
+
+  if (flags.master.isNone()) {
+    cerr << flags.usage("Missing --master") << endl;
+    return EXIT_FAILURE;
+  }
+
+  internal::logging::initialize(argv[0], true, flags); // Catch signals.
 
   // Log any flag warnings (after logging is initialized).
   foreach (const flags::Warning& warning, load->warnings) {
@@ -242,18 +266,20 @@ int main(int argc, char** argv)
   ExecutorInfo executor;
   executor.mutable_executor_id()->set_value("default");
   executor.mutable_command()->set_value(uri);
-  executor.set_name("Test Executor (C++)");
-  executor.set_source("cpp_test");
+  executor.set_name(EXECUTOR_NAME);
 
   FrameworkInfo framework;
   framework.set_user(""); // Have Mesos fill in the current user.
-  framework.set_name("Test Framework (C++)");
-  framework.set_role(flags.role);
+  framework.set_name(FRAMEWORK_NAME);
+  framework.add_roles(flags.role);
+  framework.add_capabilities()->set_type(
+      FrameworkInfo::Capability::MULTI_ROLE);
+  framework.add_capabilities()->set_type(
+      FrameworkInfo::Capability::RESERVATION_REFINEMENT);
 
   value = os::getenv("MESOS_CHECKPOINT");
   if (value.isSome()) {
-    framework.set_checkpoint(
-        numify<bool>(value.get()).get());
+    framework.set_checkpoint(numify<bool>(value.get()).get());
   }
 
   bool implicitAcknowledgements = true;
@@ -295,7 +321,7 @@ int main(int argc, char** argv)
         implicitAcknowledgements,
         credential);
   } else {
-    framework.set_principal("test-framework-cpp");
+    framework.set_principal(FRAMEWORK_PRINCIPAL);
 
     driver = new MesosSchedulerDriver(
         &scheduler,

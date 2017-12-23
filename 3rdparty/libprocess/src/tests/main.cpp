@@ -12,6 +12,10 @@
 
 #include <signal.h>
 
+#include <memory>
+#include <string>
+#include <vector>
+
 #include <glog/logging.h>
 #include <glog/raw_logging.h>
 
@@ -23,12 +27,42 @@
 #include <process/gtest.hpp>
 #include <process/process.hpp>
 
-#ifdef __WINDOWS__
-#include <process/windows/winsock.hpp>
-#else
+#ifndef __WINDOWS__
 #include <stout/os/signals.hpp>
 #endif // __WINDOWS__
 
+#include <stout/tests/environment.hpp>
+
+using std::make_shared;
+using std::shared_ptr;
+using std::string;
+using std::vector;
+
+using stout::internal::tests::Environment;
+using stout::internal::tests::TestFilter;
+
+
+class ThreadsafeFilter : public TestFilter
+{
+public:
+  ThreadsafeFilter()
+#if GTEST_IS_THREADSAFE
+    : is_threadsafe(true) {}
+#else
+    : is_threadsafe(false) {}
+#endif
+
+  bool disable(const ::testing::TestInfo* test) const override
+  {
+    return matches(test, "THREADSAFE_") && !is_threadsafe;
+  }
+
+private:
+  const bool is_threadsafe;
+};
+
+using std::shared_ptr;
+using std::vector;
 
 // NOTE: We use RAW_LOG instead of LOG because RAW_LOG doesn't
 // allocate any memory or grab locks. And according to
@@ -42,11 +76,6 @@ inline void handler(int signal)
 
 int main(int argc, char** argv)
 {
-#ifdef __WINDOWS__
-  // Initialize the Windows socket stack.
-  process::Winsock winsock;
-#endif
-
   // Initialize Google Mock/Test.
   testing::InitGoogleMock(&argc, argv);
 
@@ -68,6 +97,10 @@ int main(int argc, char** argv)
   os::signals::reset(SIGTERM);
 #endif // __WINDOWS__
 
+  vector<shared_ptr<TestFilter>> filters = {make_shared<ThreadsafeFilter>()};
+  Environment* environment = new Environment(filters);
+  testing::AddGlobalTestEnvironment(environment);
+
   // Add the libprocess test event listeners.
   ::testing::TestEventListeners& listeners =
     ::testing::UnitTest::GetInstance()->listeners();
@@ -77,6 +110,6 @@ int main(int argc, char** argv)
 
   int result = RUN_ALL_TESTS();
 
-  process::finalize();
+  process::finalize(true);
   return result;
 }

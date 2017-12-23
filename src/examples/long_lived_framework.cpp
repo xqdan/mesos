@@ -42,11 +42,20 @@
 #include <stout/option.hpp>
 #include <stout/os.hpp>
 #include <stout/path.hpp>
+#include <stout/protobuf.hpp>
 #include <stout/stringify.hpp>
+
+#include <stout/os/realpath.hpp>
+
+#include "common/parse.hpp"
+
+#include "logging/logging.hpp"
 
 using std::queue;
 using std::string;
 using std::vector;
+
+using google::protobuf::RepeatedPtrField;
 
 using mesos::v1::AgentID;
 using mesos::v1::CommandInfo;
@@ -79,7 +88,6 @@ using process::http::OK;
 using process::metrics::Gauge;
 using process::metrics::Counter;
 
-
 // NOTE: Per-task resources are nominal because all of the resources for the
 // container are provisioned when the executor is created. The executor can
 // run multiple tasks at once, but uses a constant amount of resources
@@ -89,6 +97,11 @@ const int32_t MEM_PER_TASK = 1;
 
 const double CPUS_PER_EXECUTOR = 0.1;
 const int32_t MEM_PER_EXECUTOR = 32;
+
+constexpr char EXECUTOR_BINARY[] = "long-lived-executor";
+constexpr char EXECUTOR_NAME[] = "Long Lived Executor (C++)";
+constexpr char FRAMEWORK_NAME[] = "Long Lived Framework (C++)";
+constexpr char FRAMEWORK_METRICS_PREFIX[] = "long_lived_framework";
 
 
 // This scheduler picks one agent and repeatedly launches sleep tasks on it,
@@ -101,14 +114,19 @@ public:
       const string& _master,
       const FrameworkInfo& _framework,
       const ExecutorInfo& _executor,
-      const Option<Credential> _credential)
+      const Option<Credential>& _credential)
     : state(DISCONNECTED),
       master(_master),
       framework(_framework),
+      role(_framework.roles(0)),
       executor(_executor),
-      taskResources(Resources::parse(
-          "cpus:" + stringify(CPUS_PER_TASK) +
-          ";mem:" + stringify(MEM_PER_TASK)).get()),
+      taskResources([this]() {
+        Resources resources = Resources::parse(
+            "cpus:" + stringify(CPUS_PER_TASK) +
+            ";mem:" + stringify(MEM_PER_TASK)).get();
+        resources.allocate(this->role);
+        return resources;
+      }()),
       tasksLaunched(0),
       credential(_credential),
       metrics(*this)
@@ -123,13 +141,14 @@ protected:
   {
     // We initialize the library here to ensure that callbacks are only invoked
     // after the process has spawned.
-    mesos.reset(new Mesos(
-      master,
-      mesos::ContentType::PROTOBUF,
-      process::defer(self(), &Self::connected),
-      process::defer(self(), &Self::disconnected),
-      process::defer(self(), &Self::received, lambda::_1),
-      credential));
+    mesos.reset(
+        new Mesos(
+            master,
+            mesos::ContentType::PROTOBUF,
+            process::defer(self(), &Self::connected),
+            process::defer(self(), &Self::disconnected),
+            process::defer(self(), &Self::received, lambda::_1),
+            credential));
   }
 
   void connected()
@@ -177,8 +196,7 @@ protected:
 
       switch (event.type()) {
         case Event::SUBSCRIBED: {
-          framework.mutable_id()->
-            CopyFrom(event.subscribed().framework_id());
+          framework.mutable_id()->CopyFrom(event.subscribed().framework_id());
 
           LOG(INFO) << "Subscribed with ID '" << framework.id() << "'";
 
@@ -195,6 +213,10 @@ protected:
           update(event.update().status());
           break;
         }
+
+        // TODO(greggomann): Implement handling of operation status updates.
+        case Event::UPDATE_OPERATION_STATUS:
+          break;
 
         case Event::FAILURE: {
           const Event::Failure& failure = event.failure();
@@ -237,7 +259,11 @@ protected:
   {
     CHECK_EQ(SUBSCRIBED, state);
 
-    static const Resources EXECUTOR_RESOURCES = Resources(executor.resources());
+    const Resources executorResources = [this]() {
+      Resources resources(executor.resources());
+      resources.allocate(role);
+      return resources;
+    }();
 
     metrics.offers_received += offers.size();
 
@@ -246,11 +272,11 @@ protected:
         // No active executor running in the cluster.
         // Launch a new task with executor.
 
-        if (Resources(offer.resources()).flatten()
-            .contains(EXECUTOR_RESOURCES + taskResources)) {
-          LOG(INFO)
-            << "Starting executor and task " << tasksLaunched
-            << " on " << offer.hostname();
+        if (Resources(offer.resources())
+              .toUnreserved()
+              .contains(taskResources + executorResources)) {
+          LOG(INFO) << "Starting executor and task " << tasksLaunched << " on "
+                    << offer.hostname();
 
           launch(offer);
 
@@ -262,9 +288,11 @@ protected:
         // Offer from the same agent that has an active executor.
         // Launch more tasks on that executor.
 
-        if (Resources(offer.resources()).flatten().contains(taskResources)) {
-          LOG(INFO)
-            << "Starting task " << tasksLaunched << " on " << offer.hostname();
+        if (Resources(offer.resources())
+              .toUnreserved()
+              .contains(taskResources)) {
+          LOG(INFO) << "Starting task " << tasksLaunched << " on "
+                    << offer.hostname();
 
           launch(offer);
         } else {
@@ -306,7 +334,11 @@ protected:
         status.state() == TaskState::TASK_LOST ||
         status.state() == TaskState::TASK_FAILED ||
         status.state() == TaskState::TASK_ERROR) {
-      ++metrics.abnormal_terminations;
+      // Launch on an invalid offer should not be
+      // counted as abnormal termination.
+      if (status.reason() != TaskStatus::REASON_INVALID_OFFERS) {
+        ++metrics.abnormal_terminations;
+      }
     }
   }
 
@@ -394,6 +426,7 @@ private:
 
   const string master;
   FrameworkInfo framework;
+  const string role;
   const ExecutorInfo executor;
   const Resources taskResources;
   string uri;
@@ -422,14 +455,17 @@ private:
   {
     Metrics(const LongLivedScheduler& scheduler)
       : uptime_secs(
-            "long_lived_framework/uptime_secs",
+            string(FRAMEWORK_METRICS_PREFIX) + "/uptime_secs",
             defer(scheduler, &LongLivedScheduler::_uptime_secs)),
         subscribed(
-            "long_lived_framework/subscribed",
+            string(FRAMEWORK_METRICS_PREFIX) + "/subscribed",
             defer(scheduler, &LongLivedScheduler::_subscribed)),
-        offers_received("long_lived_framework/offers_received"),
-        tasks_launched("long_lived_framework/tasks_launched"),
-        abnormal_terminations("long_lived_framework/abnormal_terminations")
+        offers_received(
+            string(FRAMEWORK_METRICS_PREFIX) + "/offers_received"),
+        tasks_launched(
+            string(FRAMEWORK_METRICS_PREFIX) + "/tasks_launched"),
+        abnormal_terminations(
+            string(FRAMEWORK_METRICS_PREFIX) + "/abnormal_terminations")
     {
       process::metrics::add(uptime_secs);
       process::metrics::add(subscribed);
@@ -484,7 +520,29 @@ public:
 
     add(&Flags::executor_uri,
         "executor_uri",
-        "URI the fetcher should use to get the executor.");
+        "URI the fetcher should use to get the executor's binary.\n"
+        "NOTE: This flag is deprecated in favor of `--executor_uris`");
+
+    add(&Flags::executor_uris,
+        "executor_uris",
+        "The value could be a JSON-formatted string of `URI`s that\n"
+        "should be fetched before running the executor, or a file\n"
+        "path containing the JSON-formatted `URI`s. Path must be of\n"
+        "the form `file:///path/to/file` or `/path/to/file`.\n"
+        "This flag replaces `--executor_uri`.\n"
+        "See the `CommandInfo::URI` message in `mesos.proto` for the\n"
+        "expected format.\n"
+        "Example:\n"
+        "[\n"
+        "  {\n"
+        "    \"value\":\"mesos.apache.org/balloon_executor\",\n"
+        "    \"executable\":\"true\"\n"
+        "  },\n"
+        "  {\n"
+        "    \"value\":\"mesos.apache.org/bundle_for_executor.tar.gz\",\n"
+        "    \"cache\":\"true\"\n"
+        "  }\n"
+        "]");
 
     add(&Flags::executor_command,
         "executor_command",
@@ -507,9 +565,13 @@ public:
 
   Option<string> master;
 
-  // Flags for specifying the executor binary.
+  // Flags for specifying the executor binary and other URIs.
+  //
+  // TODO(armand): Remove the `--executor_uri` flag after the
+  // deprecation cycle, started in 1.4.0.
   Option<string> build_dir;
   Option<string> executor_uri;
+  Option<JSON::Array> executor_uris;
   Option<string> executor_command;
 
   bool checkpoint;
@@ -523,9 +585,17 @@ int main(int argc, char** argv)
   Flags flags;
   Try<flags::Warnings> load = flags.load("MESOS_", argc, argv);
 
-  if (load.isError()) {
-    EXIT(EXIT_FAILURE) << flags.usage(load.error());
+  if (flags.help) {
+    std::cout << flags.usage() << std::endl;
+    return EXIT_SUCCESS;
   }
+
+  if (load.isError()) {
+    std::cerr << flags.usage(load.error()) << std::endl;
+    return EXIT_FAILURE;
+  }
+
+  mesos::internal::logging::initialize(argv[0], false);
 
   // Log any flag warnings.
   foreach (const flags::Warning& warning, load->warnings) {
@@ -539,8 +609,7 @@ int main(int argc, char** argv)
   ExecutorInfo executor;
   executor.mutable_executor_id()->set_value("default");
   executor.mutable_resources()->CopyFrom(resources);
-  executor.set_name("Long Lived Executor (C++)");
-  executor.set_source("cpp_long_lived_framework");
+  executor.set_name(EXECUTOR_NAME);
 
   // Determine the command to run the executor based on three possibilities:
   //   1) `--executor_command` was set, which overrides the below cases.
@@ -554,27 +623,52 @@ int main(int argc, char** argv)
   if (flags.executor_command.isSome()) {
     command = flags.executor_command.get();
   } else if (flags.build_dir.isSome()) {
-    command = path::join(
-        flags.build_dir.get(), "src", "long-lived-executor");
+    command = path::join(flags.build_dir.get(), "src", EXECUTOR_BINARY);
   } else {
-    command = path::join(
-        os::realpath(Path(argv[0]).dirname()).get(),
-        "long-lived-executor");
+    command =
+      path::join(os::realpath(Path(argv[0]).dirname()).get(), EXECUTOR_BINARY);
   }
 
   executor.mutable_command()->set_value(command);
 
+  if (flags.executor_uris.isSome() && flags.executor_uri.isSome()) {
+    EXIT(EXIT_FAILURE)
+      << "Flag '--executor_uris' shall not be used with '--executor_uri'";
+  }
+
   // Copy `--executor_uri` into the command.
   if (flags.executor_uri.isSome()) {
+    LOG(WARNING)
+      << "Flag '--executor_uri' is deprecated, use '--executor_uris' instead";
+
     CommandInfo::URI* uri = executor.mutable_command()->add_uris();
     uri->set_value(flags.executor_uri.get());
     uri->set_executable(true);
   }
 
+  // Copy `--executor_uris` into the command.
+  if (flags.executor_uris.isSome()) {
+    Try<RepeatedPtrField<CommandInfo::URI>> parse =
+      ::protobuf::parse<RepeatedPtrField<CommandInfo::URI>>(
+          flags.executor_uris.get());
+
+    if (parse.isError()) {
+      EXIT(EXIT_FAILURE)
+        << "Failed to convert '--executor_uris' to protobuf: " << parse.error();
+    }
+
+    executor.mutable_command()->mutable_uris()->CopyFrom(parse.get());
+  }
+
   FrameworkInfo framework;
   framework.set_user(os::user().get());
-  framework.set_name("Long Lived Framework (C++)");
+  framework.set_name(FRAMEWORK_NAME);
   framework.set_checkpoint(flags.checkpoint);
+  framework.add_roles("*");
+  framework.add_capabilities()->set_type(
+      FrameworkInfo::Capability::MULTI_ROLE);
+  framework.add_capabilities()->set_type(
+      FrameworkInfo::Capability::RESERVATION_REFINEMENT);
 
   Option<Credential> credential = None();
 

@@ -13,6 +13,12 @@
 #ifndef __OPENSSL_HPP__
 #define __OPENSSL_HPP__
 
+#ifdef __WINDOWS__
+// NOTE: This must be included before the OpenSSL headers as it includes
+// `WinSock2.h` and `Windows.h` in the correct order.
+#include <stout/windows.hpp>
+#endif // __WINDOWS__
+
 #include <openssl/ssl.h>
 
 #include <string>
@@ -45,6 +51,7 @@ namespace openssl {
 //    LIBPROCESS_SSL_ENABLE_TLS_V1_0=(false|0,true|1)
 //    LIBPROCESS_SSL_ENABLE_TLS_V1_1=(false|0,true|1)
 //    LIBPROCESS_SSL_ENABLE_TLS_V1_2=(false|0,true|1)
+//    LIBPROCESS_SSL_ECDH_CURVES=(auto|list of curves separated by ':')
 //
 // TODO(benh): When/If we need to support multiple contexts in the
 // same process, for example for Server Name Indication (SNI), then

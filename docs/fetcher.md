@@ -22,7 +22,7 @@ The Mesos fetcher can copy files from a local filesytem and it also natively
 supports the HTTP, HTTPS, FTP and FTPS protocols. If the requested URI is based
 on some other protocol, then the fetcher tries to utilise a local Hadoop client
 and hence supports any protocol supported by the Hadoop client, e.g., HDFS, S3.
-See the agent [configuration documentation](configuration.md)
+See the agent [configuration documentation](configuration/agent.md)
 for how to configure the agent with a path to the Hadoop client.
 
 By default, each requested URI is downloaded directly into the sandbox directory
@@ -71,7 +71,7 @@ each URI are determined based on the following protobuf structure. (See
         optional bool executable = 2;
         optional bool extract = 3 [default = true];
         optional bool cache = 4;
-        optional string filename = 5;
+        optional string output_file = 5;
       }
       ...
       optional string user = 5;
@@ -251,7 +251,7 @@ The value of the proxy variable is of the format
 `[protocol://][user:password@]machine[:port]`, where `protocol` can be one of
 socks4, socks5, http, https.
 
-FTP/FTPS requests with a proxy also make use of a HTTP/HTTPS proxy. Even
+FTP/FTPS requests with a proxy also make use of an HTTP/HTTPS proxy. Even
 though in general this constrains the available FTP protocol operations,
 everything the fetcher uses is supported.
 

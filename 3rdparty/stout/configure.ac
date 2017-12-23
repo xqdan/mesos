@@ -68,6 +68,12 @@ AC_CONFIG_FILES([3rdparty/gmock_sources.cc])
 # Optional features.
 ###############################################################################
 
+AC_ARG_ENABLE([hardening],
+              AS_HELP_STRING([--disable-hardening],
+                             [disables security measures such as stack
+                             protection and position independent library code]),
+                             [], [enable_hardening=yes])
+
 AC_ARG_ENABLE([bundled],
               AS_HELP_STRING([--disable-bundled],
                              [build against preinstalled dependencies instead
@@ -240,6 +246,15 @@ on this system (e.g., musl), a separate FTS package must be installed.
 ###############################################################################
 # Miscellaneous checks related to (un)bundled software.
 ###############################################################################
+
+# On OS X, if `--with-apr` was not provided, we try to use an available
+# brew installed version.
+if test -z "`echo $with_apr`" &&
+   test "$OS_NAME" = "darwin" &&
+   test -n "`command -v brew`" &&
+   test -n "`brew list --versions apr`"; then
+  with_apr=`brew --prefix apr`/libexec
+fi
 
 # Check if libapr-1 prefix path was provided, and if so, add it to
 # the CPPFLAGS and LDFLAGS with respective /include/apr-1 and /lib path
@@ -505,6 +520,7 @@ if test "x$without_bundled_protobuf" = "xyes" || \
       AC_MSG_ERROR([protoc not found in PATH])
     fi
 
+    PROTOCOMPILER="$PROTOBUFPREFIX/bin/protoc"
   else
     AC_MSG_ERROR([cannot find protobuf
 -------------------------------------------------------------------
@@ -524,6 +540,7 @@ fi
 AM_CONDITIONAL([WITH_BUNDLED_PROTOBUF],
                [test "x$with_bundled_protobuf" = "xyes"])
 
+AC_SUBST([PROTOCOMPILER])
 
 # Check if libsvn-1 prefix path was provided, and if so, add it to
 # the CPPFLAGS and LDFLAGS with respective /include and /lib path
@@ -572,6 +589,9 @@ libsubversion-1 is required for stout tests to build.
 # Compiler checks.
 ###############################################################################
 
+# Check to see if we should harden or not.
+AM_CONDITIONAL([ENABLE_HARDENING], [test x"$enable_hardening" = "xyes"])
+
 AS_CASE($ax_cv_cxx_compiler_vendor,
   [clang], [
     # Check if -Wno-unused-local-typedef is needed by checking a sample
@@ -618,6 +638,12 @@ AS_CASE($ax_cv_cxx_compiler_vendor,
     AC_MSG_WARN([$ax_cv_cxx_compiler_vendor is an unsupported compiler])
   ]
 )
+
+# If our compiler supports strong stack protection, use it.
+# If not, use a lesser form of stack protection.
+AX_CHECK_COMPILE_FLAG([-fstack-protector-strong],
+  [AC_SUBST(STACK_PROTECTOR, "-fstack-protector-strong")],
+  [AC_SUBST(STACK_PROTECTOR, "-fstack-protector")])
 
 # Ensure that the build environment supports C++11 (with "strict" conformance),
 # and set "--std=" flag and CXXFLAGS environment variable as appropriate.
@@ -666,9 +692,6 @@ case "$host_os" in
     if test "x$ax_cv_cxx_compiler_vendor" = "xclang"; then
       CXXFLAGS="$CXXFLAGS -stdlib=libc++"
     fi
-
-    # GTEST on OSX needs its own tr1 tuple.
-    CXXFLAGS="$CXXFLAGS -DGTEST_USE_OWN_TR1_TUPLE=1 -DGTEST_LANG_CXX11"
     ;;
   freebsd* )
     # If we're using clang, we need to pass -stdlib=libc++ too.
@@ -681,5 +704,35 @@ case "$host_os" in
     CXXFLAGS="$CXXFLAGS -DGTEST_HAS_PTHREAD -D_WITH_GETLINE"
     ;;
 esac
+
+# Once all CXXFLAGS are completely assembled, make sure the we are not
+# affected by libcxx undefined behavior,
+# https://llvm.org/bugs/show_bug.cgi?id=28469.
+AC_MSG_CHECKING([C++ standard library for undefined behaviour with selected optimization level])
+AC_LANG_PUSH([C++])
+AC_RUN_IFELSE([
+  AC_LANG_SOURCE([[
+    #include <functional>
+    #include <map>
+
+    struct F {
+      std::map<int, std::function<void()>> m;
+      F() { m[42] = []() {}; }
+    };
+
+    int main() {
+      F f;
+      f = F{};
+    }
+  ]])],
+  [
+    AC_MSG_RESULT([no])
+  ], [
+    AC_MSG_RESULT([yes])
+    AC_MSG_ERROR([stout cannot be built with optimizations against this version of libcxx (MESOS-5745).
+                  Consider building without optimizations, or changing the used C++ standard library.])
+  ]
+)
+AC_LANG_POP([C++])
 
 AC_OUTPUT

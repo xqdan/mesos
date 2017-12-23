@@ -26,7 +26,6 @@
 #include <stout/hashmap.hpp>
 
 #include "slave/flags.hpp"
-#include "slave/state.hpp"
 
 #include "slave/containerizer/mesos/isolator.hpp"
 
@@ -72,7 +71,8 @@ public:
 
 private:
   XfsDiskIsolatorProcess(
-      const Flags& flags,
+      xfs::QuotaPolicy quotaPolicy,
+      const std::string& workDir,
       const IntervalSet<prid_t>& projectIds);
 
   // Take the next project ID from the unallocated pool.
@@ -91,7 +91,8 @@ private:
     const prid_t projectId;
   };
 
-  const Flags flags;
+  xfs::QuotaPolicy quotaPolicy;
+  const std::string workDir;
   const IntervalSet<prid_t> totalProjectIds;
   IntervalSet<prid_t> freeProjectIds;
   hashmap<ContainerID, process::Owned<Info>> infos;

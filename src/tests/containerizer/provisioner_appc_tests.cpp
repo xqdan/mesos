@@ -29,6 +29,8 @@
 #include <stout/stringify.hpp>
 #include <stout/uuid.hpp>
 
+#include <stout/os/realpath.hpp>
+
 #include <stout/tests/utils.hpp>
 
 #include <mesos/appc/spec.hpp>
@@ -47,11 +49,12 @@
 
 #include "tests/mesos.hpp"
 
+#ifdef __linux__
 #include "tests/containerizer/rootfs.hpp"
+#endif
 
 namespace http = process::http;
 namespace paths = mesos::internal::slave::appc::paths;
-namespace slave = mesos::internal::slave;
 
 using std::list;
 using std::string;
@@ -83,7 +86,7 @@ namespace tests {
  * @param name Appc image name.
  * @param arch Machine architecture(e.g, x86, amd64).
  * @param os Operating system(e.g, linux).
- * @return Appc protobuff message object.
+ * @return Appc protobuf message object.
  */
 static Image::Appc getAppcImage(
     const string& name,
@@ -264,14 +267,14 @@ TEST_F(AppcStoreTest, Recover)
   Image image;
   image.mutable_appc()->CopyFrom(getTestImage());
 
-  Future<slave::ImageInfo> ImageInfo = store.get()->get(image);
+  Future<slave::ImageInfo> ImageInfo = store.get()->get(image, COPY_BACKEND);
   AWAIT_READY(ImageInfo);
 
-  EXPECT_EQ(1u, ImageInfo.get().layers.size());
+  EXPECT_EQ(1u, ImageInfo->layers.size());
   ASSERT_SOME(os::realpath(imagePath));
   EXPECT_EQ(
       os::realpath(path::join(imagePath, "rootfs")).get(),
-      ImageInfo.get().layers.front());
+      ImageInfo->layers.front());
 }
 
 
@@ -328,10 +331,10 @@ TEST_F(ProvisionerAppcTest, ROOT_Provision)
   ASSERT_SOME(rootfses);
 
   // Verify that the rootfs is successfully provisioned.
-  ASSERT_TRUE(rootfses->contains(flags.image_provisioner_backend));
-  ASSERT_EQ(1u, rootfses->get(flags.image_provisioner_backend)->size());
-  EXPECT_EQ(*rootfses->get(flags.image_provisioner_backend)->begin(),
-            Path(provisionInfo.get().rootfs).basename());
+  ASSERT_TRUE(rootfses->contains(flags.image_provisioner_backend.get()));
+  ASSERT_EQ(1u, rootfses->get(flags.image_provisioner_backend.get())->size());
+  EXPECT_EQ(*rootfses->get(flags.image_provisioner_backend.get())->begin(),
+            Path(provisionInfo->rootfs).basename());
 
   Future<bool> destroy = provisioner.get()->destroy(containerId);
   AWAIT_READY(destroy);
@@ -372,8 +375,8 @@ TEST_F(ProvisionerAppcTest, ROOT_ProvisionNestedContainer)
   ContainerID parent;
   ContainerID child;
 
-  parent.set_value(UUID::random().toString());
-  child.set_value(UUID::random().toString());
+  parent.set_value(id::UUID::random().toString());
+  child.set_value(id::UUID::random().toString());
   child.mutable_parent()->CopyFrom(parent);
 
   Future<slave::ProvisionInfo> provisionInfo =
@@ -396,10 +399,10 @@ TEST_F(ProvisionerAppcTest, ROOT_ProvisionNestedContainer)
   ASSERT_SOME(rootfses);
 
   // Verify that the rootfs is successfully provisioned.
-  ASSERT_TRUE(rootfses->contains(flags.image_provisioner_backend));
-  ASSERT_EQ(1u, rootfses->get(flags.image_provisioner_backend)->size());
-  EXPECT_EQ(*rootfses->get(flags.image_provisioner_backend)->begin(),
-            Path(provisionInfo.get().rootfs).basename());
+  ASSERT_TRUE(rootfses->contains(flags.image_provisioner_backend.get()));
+  ASSERT_EQ(1u, rootfses->get(flags.image_provisioner_backend.get())->size());
+  EXPECT_EQ(*rootfses->get(flags.image_provisioner_backend.get())->begin(),
+            Path(provisionInfo->rootfs).basename());
 
   // TODO(jieyu): Verify that 'containerDir' is nested under its
   // parent container's 'containerDir'.
@@ -440,7 +443,7 @@ TEST_F(ProvisionerAppcTest, Recover)
   image.mutable_appc()->CopyFrom(getTestImage());
 
   ContainerID containerId;
-  containerId.set_value(UUID::random().toString());
+  containerId.set_value(id::UUID::random().toString());
 
   Future<slave::ProvisionInfo> provisionInfo =
     provisioner.get()->provision(containerId, image);
@@ -473,8 +476,8 @@ TEST_F(ProvisionerAppcTest, Recover)
   ASSERT_SOME(rootfses);
 
   // Verify that the rootfs is successfully provisioned.
-  ASSERT_TRUE(rootfses->contains(flags.image_provisioner_backend));
-  EXPECT_EQ(2u, rootfses->get(flags.image_provisioner_backend)->size());
+  ASSERT_TRUE(rootfses->contains(flags.image_provisioner_backend.get()));
+  EXPECT_EQ(2u, rootfses->get(flags.image_provisioner_backend.get())->size());
 
   Future<bool> destroy = provisioner.get()->destroy(containerId);
   AWAIT_READY(destroy);
@@ -513,8 +516,8 @@ TEST_F(ProvisionerAppcTest, RecoverNestedContainer)
   ContainerID parent;
   ContainerID child;
 
-  parent.set_value(UUID::random().toString());
-  child.set_value(UUID::random().toString());
+  parent.set_value(id::UUID::random().toString());
+  child.set_value(id::UUID::random().toString());
   child.mutable_parent()->CopyFrom(parent);
 
   AWAIT_READY(provisioner.get()->provision(parent, image));
@@ -582,8 +585,8 @@ TEST_F(ProvisionerAppcTest, RecoverNestedContainerNoParentImage)
   ContainerID parent;
   ContainerID child;
 
-  parent.set_value(UUID::random().toString());
-  child.set_value(UUID::random().toString());
+  parent.set_value(id::UUID::random().toString());
+  child.set_value(id::UUID::random().toString());
   child.mutable_parent()->CopyFrom(parent);
 
   AWAIT_READY(provisioner.get()->provision(child, image));
@@ -663,9 +666,9 @@ public:
   }
 
 private:
-  // TODO(jojy): Currently hard-codes the images dierctory name.
+  // TODO(jojy): Currently hard-codes the images directory name.
   // Consider parameterizing the directory name. This could be done
-  // by removing the 'const' ness of teh variable and adding mutator.
+  // by removing the 'const' ness of the variable and adding mutator.
   const string imagesDirName;
 };
 
@@ -782,7 +785,7 @@ TEST_F(AppcImageFetcherTest, CURL_SimpleHttpFetch)
   // Appc Image to be fetched.
   const string discoverableImageName = strings::format(
       "%s/TestAppcImageServer/%s",
-      stringify(server.self().address) ,
+      stringify(server.self().address),
       imageName).get();
 
   Image::Appc appc = getAppcImage(discoverableImageName);
@@ -794,7 +797,7 @@ TEST_F(AppcImageFetcherTest, CURL_SimpleHttpFetch)
   slave::Flags flags;
 
   Try<Owned<slave::appc::Fetcher>> fetcher =
-    slave::appc::Fetcher::create(flags, uriFetcher.get().share());
+    slave::appc::Fetcher::create(flags, uriFetcher->share());
 
   ASSERT_SOME(fetcher);
 
@@ -812,12 +815,12 @@ TEST_F(AppcImageFetcherTest, CURL_SimpleHttpFetch)
   ASSERT_SOME(imageDirs);
 
   // Verify that there is only ONE image directory.
-  ASSERT_EQ(1u, imageDirs.get().size());
+  ASSERT_EQ(1u, imageDirs->size());
 
   // Verify that there is a roofs.
   const Path imageRootfs(path::join(
       imageFetchDir,
-      imageDirs.get().front(),
+      imageDirs->front(),
       "rootfs"));
 
   ASSERT_TRUE(os::exists(imageRootfs));
@@ -854,7 +857,7 @@ TEST_F(AppcImageFetcherTest, SimpleFileFetch)
   flags.appc_simple_discovery_uri_prefix = imageDirMountPath + "/";
 
   Try<Owned<slave::appc::Fetcher>> fetcher =
-    slave::appc::Fetcher::create(flags, uriFetcher.get().share());
+    slave::appc::Fetcher::create(flags, uriFetcher->share());
 
   ASSERT_SOME(fetcher);
 
@@ -872,12 +875,12 @@ TEST_F(AppcImageFetcherTest, SimpleFileFetch)
   ASSERT_SOME(imageDirs);
 
   // Verify that there is only ONE image directory.
-  ASSERT_EQ(1u, imageDirs.get().size());
+  ASSERT_EQ(1u, imageDirs->size());
 
   // Verify that there is a roofs.
   const Path imageRootfs(path::join(
       imageFetchDir,
-      imageDirs.get().front(),
+      imageDirs->front(),
       "rootfs"));
 
   ASSERT_TRUE(os::exists(imageRootfs));
@@ -1017,14 +1020,20 @@ TEST_F(AppcProvisionerIntegrationTest, ROOT_SimpleLinuxImageTest)
   container->set_type(ContainerInfo::MESOS);
   container->mutable_mesos()->mutable_image()->CopyFrom(image);
 
+  Future<TaskStatus> statusStarting;
   Future<TaskStatus> statusRunning;
   Future<TaskStatus> statusFinished;
 
   EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&statusStarting))
     .WillOnce(FutureArg<1>(&statusRunning))
     .WillOnce(FutureArg<1>(&statusFinished));
 
   driver.launchTasks(offer.id(), {task});
+
+  AWAIT_READY_FOR(statusStarting, Seconds(120));
+  EXPECT_EQ(task.task_id(), statusStarting->task_id());
+  EXPECT_EQ(TASK_STARTING, statusStarting->state());
 
   AWAIT_READY_FOR(statusRunning, Seconds(120));
   EXPECT_EQ(task.task_id(), statusRunning->task_id());

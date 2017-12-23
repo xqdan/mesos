@@ -8,7 +8,7 @@ layout: documentation
 
 ## Motivation
 
-Mesos currently supports several [containerizers](containerizer.md),
+Mesos currently supports several [containerizers](containerizers.md),
 notably the Mesos containerizer and the Docker containerizer. Mesos
 containerizer uses native OS features directly to provide isolation
 between containers, while Docker containerizer delegates container
@@ -195,7 +195,7 @@ Operators can either specify the flag as an absolute path pointing to
 the docker config file (need to manually configure
 `.docker/config.json` or `.dockercfg` on each agent), or specify the
 flag as a JSON-formatted string. See [configuration
-documentation](configuration.md) for detail. For example:
+documentation](configuration/agent.md) for detail. For example:
 
     --docker_config=file:///home/vagrant/.docker/config.json
 
@@ -231,12 +231,21 @@ of the Docker image.
 If the `--switch_user` flag is set on the agent and the framework
 specifies a user (either `CommandInfo.user` or `FrameworkInfo.user`),
 we expect that user exists in the container image and its uid and gids
-matches that on the host. User namespace and capabilities are not
-supported yet.
+matches that on the host. User namespace is not supported yet. If the
+user is not specified, `root` will be used by default. The operator or
+the framework can limit the
+[capabilities](http://man7.org/linux/man-pages/man7/capabilities.7.html)
+of the container by using the
+[linux/capabilities](isolators/linux-capabilities.md) isolator.
 
-Only host network is supported. We will add bridge network support
-soon using CNI support in Mesos
-([MESOS-4641](https://issues.apache.org/jira/browse/MESOS-4641)).
+Currently, we support `host`, `bridge` and user defined networks
+([reference](https://docs.docker.com/engine/userguide/networking/)).
+`none` is not supported yet. We support the above networking modes in
+[Mesos Containerizer](mesos-containerizer.md) using the
+[CNI](https://github.com/containernetworking/cni) (Container Network
+Interface) standard. Please refer to the [network/cni](cni.md)
+isolator document for more details about how to configure the network
+for the container.
 
 ### More agent flags
 
@@ -285,8 +294,29 @@ is `/tmp/mesos/store/appc`.
 ## Provisioner Backends
 
 A provisioner backend takes a set of filesystem layers and stacks them
-into a root filesystem. The following backends are supported
-currently.
+into a root filesystem. Currently, we support the following backends:
+`copy`, `bind`, `overlay` and `aufs`. Mesos will validate if the
+selected backend works with the underlying filesystem (the filesystem
+used by the image store `--docker_store_dir` or `--appc_store_dir`)
+using the following logic table:
+
+    +---------+--------------+------------------------------------------+
+    | Backend | Suggested on | Disabled on                              |
+    +---------+--------------+------------------------------------------+
+    | aufs    | ext4 xfs     | btrfs aufs eCryptfs                      |
+    | overlay | ext4 xfs     | btrfs aufs overlay overlay2 zfs eCryptfs |
+    | bind    |              | N/A(`--sandbox_directory' must exist)    |
+    | copy    |              | N/A                                      |
+    +---------+--------------+------------------------------------------+
+
+The provisioner backend can be specified through the agent flag
+`--image_provisioner_backend`. If not set, Mesos will select the best
+backend automatically for the users/operators. The selection logic is
+as following:
+
+    1. Use `overlay` backend if the overlayfs is available.
+    2. Use `aufs` backend if the aufs is available and overlayfs is not supported.
+    3. Use `copy` backend if none of above is selected.
 
 ### Copy
 

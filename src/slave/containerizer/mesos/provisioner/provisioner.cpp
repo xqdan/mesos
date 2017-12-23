@@ -22,6 +22,8 @@
 
 #include <mesos/docker/spec.hpp>
 
+#include <mesos/secret/resolver.hpp>
+
 #include <process/collect.hpp>
 #include <process/defer.hpp>
 #include <process/dispatch.hpp>
@@ -30,34 +32,168 @@
 #include <stout/foreach.hpp>
 #include <stout/hashmap.hpp>
 #include <stout/hashset.hpp>
+#include <stout/lambda.hpp>
 #include <stout/os.hpp>
 #include <stout/stringify.hpp>
 #include <stout/uuid.hpp>
 
-#include "slave/paths.hpp"
+#include <stout/os/realpath.hpp>
 
+#ifdef __linux__
+#include "linux/fs.hpp"
+#endif
+
+#include "slave/paths.hpp"
+#include "slave/state.hpp"
+
+#include "slave/containerizer/mesos/provisioner/constants.hpp"
 #include "slave/containerizer/mesos/provisioner/backend.hpp"
 #include "slave/containerizer/mesos/provisioner/paths.hpp"
 #include "slave/containerizer/mesos/provisioner/provisioner.hpp"
 #include "slave/containerizer/mesos/provisioner/store.hpp"
 
-using namespace process;
-
-namespace spec = docker::spec;
-
 using std::list;
 using std::string;
 using std::vector;
 
+using process::Failure;
+using process::Future;
+using process::Owned;
+using process::ReadWriteLock;
+
+using mesos::internal::slave::AUFS_BACKEND;
+using mesos::internal::slave::BIND_BACKEND;
+using mesos::internal::slave::COPY_BACKEND;
+using mesos::internal::slave::OVERLAY_BACKEND;
+
+using mesos::slave::ContainerLayers;
 using mesos::slave::ContainerState;
 
 namespace mesos {
 namespace internal {
 namespace slave {
 
-Try<Owned<Provisioner>> Provisioner::create(const Flags& flags)
+// Validate whether the backend is supported on the underlying
+// filesystem. Please see the following logic table for detail:
+// +---------+--------------+------------------------------------------+
+// | Backend | Suggested on | Disabled on                              |
+// +---------+--------------+------------------------------------------+
+// | aufs    | ext4 xfs     | btrfs aufs eCryptfs                      |
+// | overlay | ext4 xfs     | btrfs aufs overlay overlay2 zfs eCryptfs |
+// | bind    |              | N/A(`--sandbox_directory' must exist)    |
+// | copy    |              | N/A                                      |
+// +---------+--------------+------------------------------------------+
+static Try<Nothing> validateBackend(
+    const string& backend,
+    const string& directory)
 {
-  string _rootDir = slave::paths::getProvisionerDir(flags.work_dir);
+  // Copy backend is supported on all underlying filesystems.
+  if (backend == COPY_BACKEND) {
+    return Nothing();
+  }
+
+#ifdef __linux__
+  // Bind backend is supported on all underlying filesystems.
+  if (backend == BIND_BACKEND) {
+    return Nothing();
+  }
+
+  Try<uint32_t> fsType = fs::type(directory);
+  if (fsType.isError()) {
+    return Error(
+      "Failed to get filesystem type id from directory '" +
+      directory + "': " + fsType.error());
+  }
+
+  Try<string> _fsTypeName = fs::typeName(fsType.get());
+
+  string fsTypeName = _fsTypeName.isSome()
+    ? _fsTypeName.get()
+    : stringify(fsType.get());
+
+  if (backend == OVERLAY_BACKEND) {
+    vector<uint32_t> exclusives = {
+      FS_TYPE_AUFS,
+      FS_TYPE_BTRFS,
+      FS_TYPE_ECRYPTFS,
+      FS_TYPE_ZFS,
+      FS_TYPE_OVERLAY
+    };
+
+    if (std::find(exclusives.begin(),
+                  exclusives.end(),
+                  fsType.get()) != exclusives.end()) {
+      return Error(
+          "Backend '" + stringify(OVERLAY_BACKEND) + "' is not supported "
+          "on the underlying filesystem '" + fsTypeName + "'");
+    }
+
+    // Check whether `d_type` is supported. We need to create a
+    // directory entry to probe this since `.` and `..` may be
+    // marked `DT_DIR` even if the filesystem does not otherwise
+    // have `d_type` support.
+    string probeDir = path::join(directory, ".probe");
+
+    Try<Nothing> mkdir = os::mkdir(probeDir);
+    if (mkdir.isError()) {
+      return Error(
+          "Failed to create temporary directory '" +
+          probeDir + "': " + mkdir.error());
+    }
+
+    Try<bool> supportDType = fs::dtypeSupported(directory);
+
+    // clean up first
+    Try<Nothing> rmdir = os::rmdir(probeDir);
+    if (rmdir.isError()) {
+      LOG(WARNING) << "Failed to remove temporary directory"
+                   << "' " << probeDir << "': " << rmdir.error();
+     }
+
+    if (supportDType.isError()) {
+      return Error(
+          "Cannot verify filesystem attributes: " +
+          supportDType.error());
+    }
+
+    if (!supportDType.get()) {
+      return Error(
+          "Backend '" + stringify(OVERLAY_BACKEND) +
+          "' is not supported due to missing d_type support " +
+          "on the underlying filesystem");
+    }
+
+    return Nothing();
+  }
+
+  if (backend == AUFS_BACKEND) {
+    vector<uint32_t> exclusives = {
+      FS_TYPE_AUFS,
+      FS_TYPE_BTRFS,
+      FS_TYPE_ECRYPTFS
+    };
+
+    if (std::find(exclusives.begin(),
+                  exclusives.end(),
+                  fsType.get()) != exclusives.end()) {
+      return Error(
+          "Backend '" + stringify(AUFS_BACKEND) + "' is not supported "
+          "on the underlying filesystem '" + fsTypeName + "'");
+    }
+
+    return Nothing();
+  }
+#endif // __linux__
+
+  return Error("Validation not supported");
+}
+
+
+Try<Owned<Provisioner>> Provisioner::create(
+    const Flags& flags,
+    SecretResolver* secretResolver)
+{
+  const string _rootDir = slave::paths::getProvisionerDir(flags.work_dir);
 
   Try<Nothing> mkdir = os::mkdir(_rootDir);
   if (mkdir.isError()) {
@@ -75,7 +211,9 @@ Try<Owned<Provisioner>> Provisioner::create(const Flags& flags)
 
   CHECK_SOME(rootDir); // Can't be None since we just created it.
 
-  Try<hashmap<Image::Type, Owned<Store>>> stores = Store::create(flags);
+  Try<hashmap<Image::Type, Owned<Store>>> stores =
+    Store::create(flags, secretResolver);
+
   if (stores.isError()) {
     return Error("Failed to create image stores: " + stores.error());
   }
@@ -85,16 +223,85 @@ Try<Owned<Provisioner>> Provisioner::create(const Flags& flags)
     return Error("No usable provisioner backend created");
   }
 
-  if (!backends.contains(flags.image_provisioner_backend)) {
-    return Error(
-        "The specified provisioner backend '" +
-        flags.image_provisioner_backend + "' is unsupported");
+  // Determine the default backend:
+  // 1) If the user specifies the backend, make sure it is supported
+  //    w.r.t. the underlying filesystem.
+  // 2) If the user does not specify the backend, pick the default
+  //    backend according to a pre-defined order, and make sure the
+  //    picked one is supported w.r.t. the underlying filesystem.
+  //
+  // TODO(jieyu): Only validating backends against provisioner dir is
+  // not sufficient. We need to validate against all the store dir as
+  // well. Consider introducing a default backend for each store.
+  Option<string> defaultBackend;
+
+  if (flags.image_provisioner_backend.isSome()) {
+    if (!backends.contains(flags.image_provisioner_backend.get())) {
+      return Error(
+          "The specified provisioner backend '" +
+          flags.image_provisioner_backend.get() +
+          "' is not supported: Not found");
+    }
+
+    Try<Nothing> supported = validateBackend(
+        flags.image_provisioner_backend.get(),
+        rootDir.get());
+
+    if (supported.isError()) {
+      return Error(
+          "The specified provisioner backend '" +
+          flags.image_provisioner_backend.get() +
+          "' is not supported: " + supported.error());
+    }
+
+    defaultBackend = flags.image_provisioner_backend.get();
+  } else {
+    // TODO(gilbert): Consider select the bind backend if it is a
+    // single layer image. Please note that a read-only filesystem
+    // (e.g., using the bind backend) requires the sandbox already
+    // exists.
+    //
+    // Choose a backend smartly if no backend is specified. The follow
+    // list is a priority list, meaning that we favor backends in the
+    // front of the list.
+    vector<string> backendNames = {
+#ifdef __linux__
+      OVERLAY_BACKEND,
+      AUFS_BACKEND,
+#endif // __linux__
+      COPY_BACKEND
+    };
+
+    foreach (const string& backendName, backendNames) {
+      if (!backends.contains(backendName)) {
+        continue;
+      }
+
+      Try<Nothing> supported = validateBackend(backendName, rootDir.get());
+      if (supported.isError()) {
+        LOG(INFO) << "Provisioner backend '"
+                  << backendName << "' is not supported on '"
+                  << rootDir.get() << "': " << supported.error();
+        continue;
+      }
+
+      defaultBackend = backendName;
+      break;
+    }
+
+    if (defaultBackend.isNone()) {
+      return Error("Failed to find a default backend");
+    }
   }
+
+  CHECK_SOME(defaultBackend);
+
+  LOG(INFO) << "Using default backend '" << defaultBackend.get() << "'";
 
   return Owned<Provisioner>(new Provisioner(
       Owned<ProvisionerProcess>(new ProvisionerProcess(
-          flags,
           rootDir.get(),
+          defaultBackend.get(),
           stores.get(),
           backends))));
 }
@@ -147,14 +354,24 @@ Future<bool> Provisioner::destroy(const ContainerID& containerId) const
 }
 
 
+Future<Nothing> Provisioner::pruneImages(
+    const vector<Image>& excludedImages) const
+{
+  return dispatch(
+      CHECK_NOTNULL(process.get()),
+      &ProvisionerProcess::pruneImages,
+      excludedImages);
+}
+
+
 ProvisionerProcess::ProvisionerProcess(
-    const Flags& _flags,
     const string& _rootDir,
+    const string& _defaultBackend,
     const hashmap<Image::Type, Owned<Store>>& _stores,
     const hashmap<string, Owned<Backend>>& _backends)
   : ProcessBase(process::ID::generate("mesos-provisioner")),
-    flags(_flags),
     rootDir(_rootDir),
+    defaultBackend(_defaultBackend),
     stores(_stores),
     backends(_backends) {}
 
@@ -203,6 +420,31 @@ Future<Nothing> ProvisionerProcess::recover(
       info->rootfses.put(backend, rootfses.get()[backend]);
     }
 
+    Result<ContainerLayers> layers = None();
+    const string path = provisioner::paths::getLayersFilePath(
+      rootDir, containerId);
+
+    if (!os::exists(path)) {
+      // This is possible if we recovered a container provisioned before we
+      // started to checkpoint `ContainerLayers`.
+      VLOG(1) << "Layers path '" << path << "' is missing for container' "
+              << containerId << "'";
+    } else {
+      layers = ::protobuf::read<ContainerLayers>(path);
+    }
+
+    if (layers.isError()) {
+      return Failure(
+          "Failed to recover layers for container '" + stringify(containerId) +
+          "': " + layers.error());
+    } else if (layers.isSome()) {
+      info->layers = vector<string>();
+      std::copy(
+        layers->paths().begin(),
+        layers->paths().end(),
+        std::back_inserter(info->layers.get()));
+    }
+
     infos.put(containerId, info);
 
     if (knownContainerIds.contains(containerId)) {
@@ -242,7 +484,7 @@ Future<Nothing> ProvisionerProcess::recover(
   // A successful provisioner recovery depends on:
   //  1) Recovery of known containers (done above).
   //  2) Successful cleanup of unknown containers.
-  //  `3) Successful store recovery.
+  //  3) Successful store recovery.
   //
   // TODO(jieyu): Do not recover 'store' before unknown containers are
   // cleaned up. In the future, we may want to cleanup unused rootfses
@@ -260,30 +502,40 @@ Future<ProvisionInfo> ProvisionerProcess::provision(
     const ContainerID& containerId,
     const Image& image)
 {
-  if (!stores.contains(image.type())) {
-    return Failure(
-        "Unsupported container image type: " +
-        stringify(image.type()));
-  }
+  // `destroy` and `provision` can happen concurrently, but `pruneImages`
+  // is exclusive.
+  return rwLock.read_lock()
+    .then(defer(self(), [this, containerId, image]() -> Future<ProvisionInfo> {
+      if (!stores.contains(image.type())) {
+        return Failure(
+            "Unsupported container image type: " + stringify(image.type()));
+      }
 
-  // Get and then provision image layers from the store.
-  return stores.get(image.type()).get()->get(image)
-    .then(defer(self(), &Self::_provision, containerId, image, lambda::_1));
+      // Get and then provision image layers from the store.
+      return stores.get(image.type()).get()->get(image, defaultBackend)
+        .then(defer(
+            self(),
+            &Self::_provision,
+            containerId,
+            image,
+            defaultBackend,
+            lambda::_1));
+    }))
+    .onAny(defer(self(), [this](const Future<ProvisionInfo>&) {
+      rwLock.read_unlock();
+    }));
 }
 
 
 Future<ProvisionInfo> ProvisionerProcess::_provision(
     const ContainerID& containerId,
     const Image& image,
+    const string& backend,
     const ImageInfo& imageInfo)
 {
-  // TODO(jieyu): Choose a backend smartly. For instance, if there is
-  // only one layer returned from the store, prefer to use bind
-  // backend because it's the simplest.
-  const string& backend = flags.image_provisioner_backend;
   CHECK(backends.contains(backend));
 
-  string rootfsId = UUID::random().toString();
+  string rootfsId = id::UUID::random().toString();
 
   string rootfs = provisioner::paths::getContainerRootfsDir(
       rootDir,
@@ -292,7 +544,8 @@ Future<ProvisionInfo> ProvisionerProcess::_provision(
       rootfsId);
 
   LOG(INFO) << "Provisioning image rootfs '" << rootfs
-            << "' for container " << containerId;
+            << "' for container " << containerId
+            << " using " << backend << " backend";
 
   // NOTE: It's likely that the container ID already exists in 'infos'
   // because one container might provision multiple images.
@@ -301,6 +554,7 @@ Future<ProvisionInfo> ProvisionerProcess::_provision(
   }
 
   infos[containerId]->rootfses[backend].insert(rootfsId);
+  infos[containerId]->layers = imageInfo.layers;
 
   string backendDir = provisioner::paths::getBackendDir(
       rootDir,
@@ -312,6 +566,22 @@ Future<ProvisionInfo> ProvisionerProcess::_provision(
       rootfs,
       backendDir)
     .then([=]() -> Future<ProvisionInfo> {
+      const string path =
+        provisioner::paths::getLayersFilePath(rootDir, containerId);
+
+      ContainerLayers containerLayers;
+
+      foreach (const string& layer, imageInfo.layers) {
+        containerLayers.add_paths(layer);
+      }
+
+      Try<Nothing> checkpoint = slave::state::checkpoint(path, containerLayers);
+      if (checkpoint.isError()) {
+        return Failure(
+            "Failed to checkpoint layers to '" + path + "': " +
+            checkpoint.error());
+      }
+
       return ProvisionInfo{
           rootfs, imageInfo.dockerManifest, imageInfo.appcManifest};
     });
@@ -320,38 +590,83 @@ Future<ProvisionInfo> ProvisionerProcess::_provision(
 
 Future<bool> ProvisionerProcess::destroy(const ContainerID& containerId)
 {
-  if (!infos.contains(containerId)) {
-    VLOG(1) << "Ignoring destroy request for unknown container " << containerId;
+  // `destroy` and `provision` can happen concurrently, but `pruneImages`
+  // is exclusive.
+  return rwLock.read_lock()
+    .then(defer(self(), [this, containerId]() -> Future<bool> {
+      if (!infos.contains(containerId)) {
+        VLOG(1) << "Ignoring destroy request for unknown container "
+                << containerId;
 
-    return false;
-  }
+        return false;
+      }
 
-  // Provisioner destroy can be invoked from:
-  // 1. Provisioner `recover` to destroy all unknown orphans.
-  // 2. Containerizer `recover` to destroy known orphans.
-  // 3. Containerizer `destroy` on one specific container.
-  //
-  // In the above cases, we assume that the container being destroyed
-  // has no corresponding child containers. We fail fast if this
-  // condition is not satisfied.
-  //
-  // NOTE: This check is expensive since it traverses the entire
-  // `infos` hashmap. This is acceptable because we generally expect
-  // the number of containers on a single agent to be on the order of
-  // tens or hundreds of containers.
-  foreachkey (const ContainerID& entry, infos) {
-    if (entry.has_parent()) {
-      CHECK(entry.parent() != containerId)
-        << "Failed to destroy container "
-        << containerId << " since its nested container "
-        << entry << " has not been destroyed yet";
+      if (infos[containerId]->destroying) {
+        return infos[containerId]->termination.future();
+      }
+
+      infos[containerId]->destroying = true;
+
+      // Provisioner destroy can be invoked from:
+      // 1. Provisioner `recover` to destroy all unknown orphans.
+      // 2. Containerizer `recover` to destroy known orphans.
+      // 3. Containerizer `destroy` on one specific container.
+      //
+      // NOTE: For (2) and (3), we expect the container being destroyed
+      // has no any child contain remain running. However, for case (1),
+      // if the container runtime directory does not survive after the
+      // machine reboots and the provisioner directory under the agent
+      // work dir still exists, all containers will be regarded as
+      // unknown containers and will be destroyed. In this case, a parent
+      // container may be destroyed before its child containers are
+      // cleaned up. So we have to make `destroy()` recursively for
+      // this particular case.
+      //
+      // TODO(gilbert): Move provisioner directory to the container
+      // runtime directory after a deprecation cycle to avoid
+      // making `provisioner::destroy()` being recursive.
+      list<Future<bool>> destroys;
+
+      foreachkey (const ContainerID& entry, infos) {
+        if (entry.has_parent() && entry.parent() == containerId) {
+          destroys.push_back(destroy(entry));
+        }
+      }
+
+      return await(destroys)
+        .then(defer(self(), &Self::_destroy, containerId, lambda::_1));
+    }))
+    .onAny(defer(self(), [this](const Future<bool>&) {
+      rwLock.read_unlock();
+    }));
+}
+
+
+Future<bool> ProvisionerProcess::_destroy(
+    const ContainerID& containerId,
+    const list<Future<bool>>& destroys)
+{
+  CHECK(infos.contains(containerId));
+  CHECK(infos[containerId]->destroying);
+
+  vector<string> errors;
+  foreach (const Future<bool>& future, destroys) {
+    if (!future.isReady()) {
+      errors.push_back(future.isFailed()
+        ? future.failure()
+        : "discarded");
     }
   }
 
-  // Unregister the container first. If destroy() fails, we can rely
-  // on recover() to retry it later.
-  Owned<Info> info = infos[containerId];
-  infos.erase(containerId);
+  if (!errors.empty()) {
+    ++metrics.remove_container_errors;
+
+    return Failure(
+        "Failed to destroy nested containers: " +
+        strings::join("; ", errors));
+  }
+
+  const Owned<Info>& info = infos[containerId];
 
   list<Future<bool>> futures;
   foreachkey (const string& backend, info->rootfses) {
@@ -381,12 +696,15 @@ Future<bool> ProvisionerProcess::destroy(const ContainerID& containerId)
 
   // TODO(xujyan): Revisit the usefulness of this return value.
   return collect(futures)
-    .then(defer(self(), &ProvisionerProcess::_destroy, containerId));
+    .then(defer(self(), &ProvisionerProcess::__destroy, containerId));
 }
 
 
-Future<bool> ProvisionerProcess::_destroy(const ContainerID& containerId)
+Future<bool> ProvisionerProcess::__destroy(const ContainerID& containerId)
 {
+  CHECK(infos.contains(containerId));
+  CHECK(infos[containerId]->destroying);
+
   // This should be fairly cheap as the directory should only
   // contain a few empty sub-directories at this point.
   //
@@ -406,7 +724,63 @@ Future<bool> ProvisionerProcess::_destroy(const ContainerID& containerId)
     ++metrics.remove_container_errors;
   }
 
+  infos[containerId]->termination.set(true);
+  infos.erase(containerId);
+
   return true;
+}
+
+
+Future<Nothing> ProvisionerProcess::pruneImages(
+    const vector<Image>& excludedImages)
+{
+  // `destroy` and `provision` can happen concurrently, but `pruneImages`
+  // is exclusive.
+  return rwLock.write_lock()
+    .then(defer(self(), [this, excludedImages]() -> Future<Nothing> {
+      hashset<string> activeLayerPaths;
+
+      foreachpair (
+          const ContainerID& containerId, const Owned<Info>& info, infos) {
+        if (info->layers.isNone()) {
+          // There are several possibilities if layer information missing:
+          // - legacy containers provisioned before layer checkpointing:
+          //   they should already be excluded by the containerizer;
+          // - the agent crashed after `backend::provision()` finished but
+          //   before checkpointing the `layers`. In such a case, the rootfs
+          //   should not be used by any running containers yet so it is safe
+          //   to skip those layers;
+          // - checkpointed layer files were manually deleted: we do not expect
+          //   this to be allowd, but log it for information purpose.
+          VLOG(1) << "Container " << containerId
+                  << " has no checkpointed layers";
+
+          continue;
+        }
+
+        activeLayerPaths.insert(info->layers->begin(), info->layers->end());
+      }
+
+      list<Future<Nothing>> futures;
+
+      foreachpair (
+          const Image::Type& type, const Owned<Store>& store, stores) {
+        vector<Image> images;
+        foreach (const Image& image, excludedImages) {
+          if (image.type() == type) {
+            images.push_back(image);
+          }
+        }
+
+        futures.push_back(store->prune(images, activeLayerPaths));
+      }
+
+      return collect(futures)
+        .then([]() { return Nothing(); });
+    }))
+    .onAny(defer(self(), [this](const Future<Nothing>&) {
+      rwLock.write_unlock();
+    }));
 }
 
 

@@ -71,7 +71,6 @@ using testing::AtMost;
 using testing::DoAll;
 using testing::Return;
 using testing::SaveArg;
-using testing::WithParamInterface;
 
 namespace mesos {
 namespace internal {
@@ -384,10 +383,10 @@ TEST_F(HttpFaultToleranceTest, SchedulerFailoverStatusUpdate)
 
   AWAIT_READY(subscribed);
 
-  v1::FrameworkID frameworkId(subscribed.get().framework_id());
+  v1::FrameworkID frameworkId(subscribed->framework_id());
 
   AWAIT_READY(offers);
-  EXPECT_NE(0, offers->offers().size());
+  ASSERT_FALSE(offers->offers().empty());
 
   EXPECT_CALL(*executor, connected(_))
     .WillOnce(v1::executor::SendSubscribe(frameworkId, evolve(executorId)));
@@ -489,7 +488,7 @@ TEST_F(HttpFaultToleranceTest, SchedulerFailoverStatusUpdate)
   AWAIT_READY(disconnected);
   AWAIT_READY(subscribed);
 
-  EXPECT_EQ(frameworkId, subscribed.get().framework_id());
+  EXPECT_EQ(frameworkId, subscribed->framework_id());
 
   Clock::pause();
 
@@ -565,10 +564,10 @@ TEST_F(HttpFaultToleranceTest, SchedulerFailoverExecutorToFrameworkMessage)
 
   AWAIT_READY(subscribed);
 
-  v1::FrameworkID frameworkId(subscribed.get().framework_id());
+  v1::FrameworkID frameworkId(subscribed->framework_id());
 
   AWAIT_READY(offers);
-  EXPECT_NE(0, offers->offers().size());
+  ASSERT_FALSE(offers->offers().empty());
 
   EXPECT_CALL(*executor, connected(_))
     .WillOnce(v1::executor::SendSubscribe(frameworkId, evolve(executorId)));
@@ -649,7 +648,7 @@ TEST_F(HttpFaultToleranceTest, SchedulerFailoverExecutorToFrameworkMessage)
   AWAIT_READY(disconnected);
   AWAIT_READY(subscribed);
 
-  EXPECT_EQ(frameworkId, subscribed.get().framework_id());
+  EXPECT_EQ(frameworkId, subscribed->framework_id());
 
   Future<Event::Message> message;
   EXPECT_CALL(*scheduler2, message(_, _))
@@ -737,10 +736,10 @@ TEST_F(HttpFaultToleranceTest, SchedulerFailoverFrameworkToExecutorMessage)
 
   AWAIT_READY(subscribed);
 
-  v1::FrameworkID frameworkId(subscribed.get().framework_id());
+  v1::FrameworkID frameworkId(subscribed->framework_id());
 
   AWAIT_READY(offers);
-  EXPECT_NE(0, offers->offers().size());
+  ASSERT_FALSE(offers->offers().empty());
 
   EXPECT_CALL(*executor, connected(_))
     .WillOnce(v1::executor::SendSubscribe(frameworkId, evolve(executorId)));
@@ -819,7 +818,7 @@ TEST_F(HttpFaultToleranceTest, SchedulerFailoverFrameworkToExecutorMessage)
   AWAIT_READY(disconnected);
   AWAIT_READY(subscribed);
 
-  EXPECT_EQ(frameworkId, subscribed.get().framework_id());
+  EXPECT_EQ(frameworkId, subscribed->framework_id());
 
   Future<v1::executor::Event::Message> message;
   EXPECT_CALL(*executor, message(_, _))
@@ -906,10 +905,10 @@ TEST_F(HttpFaultToleranceTest, SchedulerExit)
 
   AWAIT_READY(subscribed);
 
-  v1::FrameworkID frameworkId(subscribed.get().framework_id());
+  v1::FrameworkID frameworkId(subscribed->framework_id());
 
   AWAIT_READY(offers);
-  EXPECT_NE(0, offers->offers().size());
+  ASSERT_FALSE(offers->offers().empty());
 
   EXPECT_CALL(*executor, connected(_))
     .WillOnce(v1::executor::SendSubscribe(frameworkId, evolve(executorId)));

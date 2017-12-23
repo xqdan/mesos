@@ -29,8 +29,6 @@
 #include "slave/containerizer/mesos/containerizer.hpp"
 #include "slave/containerizer/mesos/linux_launcher.hpp"
 
-#include "slave/containerizer/mesos/io/switchboard.hpp"
-
 #include "slave/containerizer/mesos/isolators/docker/runtime.hpp"
 
 #include "slave/containerizer/mesos/isolators/docker/volume/driver.hpp"
@@ -51,8 +49,6 @@ using std::string;
 using std::vector;
 
 using mesos::internal::master::Master;
-
-using mesos::internal::slave::IOSwitchboard;
 
 using mesos::internal::slave::DockerRuntimeIsolatorProcess;
 using mesos::internal::slave::DockerVolumeIsolatorProcess;
@@ -106,9 +102,9 @@ protected:
   {
     // Try to remove any mounts under sandbox.
     if (::geteuid() == 0) {
-      Try<Nothing> unmountAll = fs::unmountAll(sandbox->c_str(), MNT_DETACH);
+      Try<Nothing> unmountAll = fs::unmountAll(sandbox.get(), MNT_DETACH);
       if (unmountAll.isError()) {
-        LOG(ERROR) << "Failed to unmount '" << sandbox->c_str()
+        LOG(ERROR) << "Failed to unmount '" << sandbox.get()
                    << "': " << unmountAll.error();
         return;
       }
@@ -155,6 +151,8 @@ protected:
       const slave::Flags& flags,
       const Owned<DriverClient>& mockClient)
   {
+    fetcher.reset(new Fetcher(flags));
+
     Try<Isolator*> linuxIsolator_ =
       LinuxFilesystemIsolatorProcess::create(flags);
 
@@ -195,33 +193,30 @@ protected:
 
     Owned<Launcher> launcher(launcher_.get());
 
-    Try<Owned<IOSwitchboard>> ioSwitchboard =
-      IOSwitchboard::create(flags, false);
-
-    if (ioSwitchboard.isError()) {
-      return Error("Failed to create container io switchboard:"
-                   " " + ioSwitchboard.error());
-    }
-
     Try<Owned<Provisioner>> provisioner = Provisioner::create(flags);
     if (provisioner.isError()) {
       return Error("Failed to create provisioner: " + provisioner.error());
     }
 
-    return Owned<MesosContainerizer>(
-        new MesosContainerizer(
-            flags,
-            &fetcher,
-            std::move(ioSwitchboard.get()),
-            std::move(launcher),
-            provisioner->share(),
-            {std::move(linuxIsolator),
-             std::move(runtimeIsolator),
-             std::move(volumeIsolator)}));
+    Try<MesosContainerizer*> containerizer = MesosContainerizer::create(
+        flags,
+        true,
+        fetcher.get(),
+        std::move(launcher),
+        provisioner->share(),
+        {std::move(linuxIsolator),
+         std::move(runtimeIsolator),
+         std::move(volumeIsolator)});
+
+    if (containerizer.isError()) {
+      return Error("Failed to create containerizer: " + containerizer.error());
+    }
+
+    return Owned<MesosContainerizer>(containerizer.get());
   }
 
 private:
-  Fetcher fetcher;
+  Owned<Fetcher> fetcher;
 };
 
 
@@ -247,7 +242,7 @@ TEST_F(DockerVolumeIsolatorTest, ROOT_CommandTaskNoRootfsWithVolumes)
 
   Try<Owned<cluster::Slave>> slave = StartSlave(
       detector.get(),
-      containerizer.get().get(),
+      containerizer->get(),
       flags);
 
   ASSERT_SOME(slave);
@@ -274,7 +269,7 @@ TEST_F(DockerVolumeIsolatorTest, ROOT_CommandTaskNoRootfsWithVolumes)
   AWAIT_READY(frameworkId);
 
   AWAIT_READY(offers);
-  ASSERT_NE(0u, offers->size());
+  ASSERT_FALSE(offers->empty());
 
   const Offer& offer = offers.get()[0];
 
@@ -347,14 +342,19 @@ TEST_F(DockerVolumeIsolatorTest, ROOT_CommandTaskNoRootfsWithVolumes)
     .WillOnce(DoAll(FutureArg<1>(&unmount2Name),
                     Return(Nothing())));
 
+  Future<TaskStatus> statusStarting;
   Future<TaskStatus> statusRunning;
   Future<TaskStatus> statusFinished;
 
   EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&statusStarting))
     .WillOnce(FutureArg<1>(&statusRunning))
     .WillOnce(FutureArg<1>(&statusFinished));
 
   driver.launchTasks(offer.id(), {task});
+
+  AWAIT_READY(statusStarting);
+  EXPECT_EQ(TASK_STARTING, statusStarting->state());
 
   AWAIT_READY(statusRunning);
   EXPECT_EQ(TASK_RUNNING, statusRunning->state());
@@ -401,7 +401,7 @@ TEST_F(DockerVolumeIsolatorTest, ROOT_CommandTaskNoRootfsFailedWithSameVolumes)
 
   Try<Owned<cluster::Slave>> slave = StartSlave(
       detector.get(),
-      containerizer.get().get(),
+      containerizer->get(),
       flags);
 
   ASSERT_SOME(slave);
@@ -428,7 +428,7 @@ TEST_F(DockerVolumeIsolatorTest, ROOT_CommandTaskNoRootfsFailedWithSameVolumes)
   AWAIT_READY(frameworkId);
 
   AWAIT_READY(offers);
-  ASSERT_NE(0u, offers->size());
+  ASSERT_FALSE(offers->empty());
 
   const Offer& offer = offers.get()[0];
 
@@ -501,7 +501,7 @@ TEST_F(DockerVolumeIsolatorTest, ROOT_CommandTaskNoRootfsSlaveRecovery)
 
   Try<Owned<cluster::Slave>> slave = StartSlave(
       detector.get(),
-      containerizer.get().get(),
+      containerizer->get(),
       flags);
 
   ASSERT_SOME(slave);
@@ -532,7 +532,7 @@ TEST_F(DockerVolumeIsolatorTest, ROOT_CommandTaskNoRootfsSlaveRecovery)
   AWAIT_READY(frameworkId);
 
   AWAIT_READY(offers);
-  ASSERT_NE(0u, offers->size());
+  ASSERT_FALSE(offers->empty());
 
   const Offer& offer = offers.get()[0];
 
@@ -594,21 +594,32 @@ TEST_F(DockerVolumeIsolatorTest, ROOT_CommandTaskNoRootfsSlaveRecovery)
     .WillOnce(DoAll(FutureArg<1>(&mount2Name),
                     Return(mountPoint2)));
 
+  Future<TaskStatus> statusStarting;
   Future<TaskStatus> statusRunning;
 
   EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&statusStarting))
     .WillOnce(FutureArg<1>(&statusRunning));
 
-  Future<Nothing> ack =
+  Future<Nothing> ack1 =
+    FUTURE_DISPATCH(_, &Slave::_statusUpdateAcknowledgement);
+
+  Future<Nothing> ack2 =
     FUTURE_DISPATCH(_, &Slave::_statusUpdateAcknowledgement);
 
   driver.launchTasks(offer.id(), {task});
+
+  AWAIT_READY(statusStarting);
+  EXPECT_EQ(TASK_STARTING, statusStarting->state());
+
+  // Wait for the ACK to be checkpointed.
+  AWAIT_READY(ack1);
 
   AWAIT_READY(statusRunning);
   EXPECT_EQ(TASK_RUNNING, statusRunning->state());
 
   // Wait for the ACK to be checkpointed.
-  AWAIT_READY(ack);
+  AWAIT_READY(ack2);
 
   // Stop the slave after TASK_RUNNING is received.
   slave.get()->terminate();
@@ -640,7 +651,7 @@ TEST_F(DockerVolumeIsolatorTest, ROOT_CommandTaskNoRootfsSlaveRecovery)
                     Return(Nothing())));
 
   // Use the same flags.
-  slave = StartSlave(detector.get(), containerizer.get().get(), flags);
+  slave = StartSlave(detector.get(), containerizer->get(), flags);
   ASSERT_SOME(slave);
 
   AWAIT_READY(reregistered);
@@ -650,9 +661,9 @@ TEST_F(DockerVolumeIsolatorTest, ROOT_CommandTaskNoRootfsSlaveRecovery)
 
   Future<hashset<ContainerID>> containers = containerizer.get()->containers();
   AWAIT_READY(containers);
-  ASSERT_EQ(1u, containers.get().size());
+  ASSERT_EQ(1u, containers->size());
 
-  ContainerID containerId = *(containers.get().begin());
+  ContainerID containerId = *(containers->begin());
 
   Future<TaskStatus> statusKilled;
   EXPECT_CALL(sched, statusUpdate(&driver, _))
@@ -698,7 +709,7 @@ TEST_F(DockerVolumeIsolatorTest,
 
   Try<Owned<cluster::Slave>> slave = StartSlave(
       detector.get(),
-      containerizer.get().get(),
+      containerizer->get(),
       flags);
 
   ASSERT_SOME(slave);
@@ -725,7 +736,7 @@ TEST_F(DockerVolumeIsolatorTest,
   AWAIT_READY(frameworkId);
 
   AWAIT_READY(offers);
-  ASSERT_NE(0u, offers->size());
+  ASSERT_FALSE(offers->empty());
 
   const Offer& offer = offers.get()[0];
 
@@ -774,12 +785,16 @@ TEST_F(DockerVolumeIsolatorTest,
   EXPECT_CALL(*mockClient, unmount(driver1, _))
     .WillOnce(Return(Nothing()));
 
+  Future<TaskStatus> statusStarting1;
   Future<TaskStatus> statusRunning1;
   Future<TaskStatus> statusKilled1;
+  Future<TaskStatus> statusStarting2;
   Future<TaskStatus> statusRunning2;
   Future<TaskStatus> statusKilled2;
 
   EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&statusStarting1))
+    .WillOnce(FutureArg<1>(&statusStarting2))
     .WillOnce(FutureArg<1>(&statusRunning1))
     .WillOnce(FutureArg<1>(&statusRunning2))
     .WillOnce(FutureArg<1>(&statusKilled1))
@@ -787,8 +802,10 @@ TEST_F(DockerVolumeIsolatorTest,
 
   driver.launchTasks(offer.id(), {task1, task2});
 
-  AWAIT_READY(statusRunning1);
-  EXPECT_EQ(TASK_RUNNING, statusRunning1->state());
+  // TASK_STARTING and TASK_RUNNING updates might arrive interleaved,
+  // so we only check the first and the last where the values are known.
+  AWAIT_READY(statusStarting1);
+  EXPECT_EQ(TASK_STARTING, statusStarting1->state());
 
   AWAIT_READY(statusRunning2);
   EXPECT_EQ(TASK_RUNNING, statusRunning2->state());
@@ -832,7 +849,7 @@ TEST_F(DockerVolumeIsolatorTest,
 
   Try<Owned<cluster::Slave>> slave = StartSlave(
       detector.get(),
-      containerizer.get().get(),
+      containerizer->get(),
       flags);
 
   ASSERT_SOME(slave);
@@ -859,7 +876,7 @@ TEST_F(DockerVolumeIsolatorTest,
   AWAIT_READY(frameworkId);
 
   AWAIT_READY(offers);
-  ASSERT_NE(0u, offers->size());
+  ASSERT_FALSE(offers->empty());
 
   const Offer& offer = offers.get()[0];
 
@@ -915,14 +932,19 @@ TEST_F(DockerVolumeIsolatorTest,
     .WillOnce(DoAll(FutureArg<1>(&unmountName),
                     Return(Nothing())));
 
+  Future<TaskStatus> statusStarting;
   Future<TaskStatus> statusRunning;
   Future<TaskStatus> statusFinished;
 
   EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&statusStarting))
     .WillOnce(FutureArg<1>(&statusRunning))
     .WillOnce(FutureArg<1>(&statusFinished));
 
   driver.launchTasks(offer.id(), {task});
+
+  AWAIT_READY(statusStarting);
+  EXPECT_EQ(TASK_STARTING, statusStarting->state());
 
   AWAIT_READY(statusRunning);
   EXPECT_EQ(TASK_RUNNING, statusRunning->state());
@@ -967,7 +989,7 @@ TEST_F(DockerVolumeIsolatorTest,
 
   Try<Owned<cluster::Slave>> slave = StartSlave(
       detector.get(),
-      containerizer.get().get(),
+      containerizer->get(),
       flags);
 
   ASSERT_SOME(slave);
@@ -994,7 +1016,7 @@ TEST_F(DockerVolumeIsolatorTest,
   AWAIT_READY(frameworkId);
 
   AWAIT_READY(offers);
-  ASSERT_NE(0u, offers->size());
+  ASSERT_FALSE(offers->empty());
 
   const Offer& offer = offers.get()[0];
 
@@ -1057,14 +1079,19 @@ TEST_F(DockerVolumeIsolatorTest,
     .WillOnce(DoAll(FutureArg<1>(&unmountName),
                     Return(Nothing())));
 
+  Future<TaskStatus> statusStarting;
   Future<TaskStatus> statusRunning;
   Future<TaskStatus> statusFinished;
 
   EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&statusStarting))
     .WillOnce(FutureArg<1>(&statusRunning))
     .WillOnce(FutureArg<1>(&statusFinished));
 
   driver.launchTasks(offer.id(), {task});
+
+  AWAIT_READY(statusStarting);
+  EXPECT_EQ(TASK_STARTING, statusStarting->state());
 
   AWAIT_READY(statusRunning);
   EXPECT_EQ(TASK_RUNNING, statusRunning->state());

@@ -54,6 +54,7 @@ using process::Failure;
 using process::Future;
 using process::PID;
 using process::Process;
+using process::Promise;
 using process::READONLY_HTTP_AUTHENTICATION_REALM;
 using process::Statistics;
 using process::UPID;
@@ -76,8 +77,12 @@ public:
 
   Future<double> pending()
   {
-    return Future<double>();
+    return promise.future();
   }
+
+  // Need to use a promise for the call to pending instead of just a
+  // `Future<double>()` so we don't return an abandoned future.
+  Promise<double> promise;
 };
 
 
@@ -136,11 +141,8 @@ TEST_F(MetricsTest, Counter)
 }
 
 
-// GTEST_IS_THREADSAFE is not defined on Windows. See MESOS-5903.
-TEST_F_TEMP_DISABLED_ON_WINDOWS(MetricsTest, Gauge)
+TEST_F(MetricsTest, THREADSAFE_Gauge)
 {
-  ASSERT_TRUE(GTEST_IS_THREADSAFE);
-
   GaugeProcess process;
   PID<GaugeProcess> pid = spawn(&process);
   ASSERT_TRUE(pid);
@@ -202,11 +204,8 @@ TEST_F(MetricsTest, Statistics)
 }
 
 
-// GTEST_IS_THREADSAFE is not defined on Windows. See MESOS-5903.
-TEST_F_TEMP_DISABLED_ON_WINDOWS(MetricsTest, Snapshot)
+TEST_F(MetricsTest, THREADSAFE_Snapshot)
 {
-  ASSERT_TRUE(GTEST_IS_THREADSAFE);
-
   UPID upid("metrics", process::address());
 
   Clock::pause();
@@ -218,10 +217,12 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(MetricsTest, Snapshot)
 
   Gauge gauge("test/gauge", defer(pid, &GaugeProcess::get));
   Gauge gaugeFail("test/gauge_fail", defer(pid, &GaugeProcess::fail));
+  Gauge gaugeConst("test/gauge_const", []() { return 99.0; });
   Counter counter("test/counter");
 
   AWAIT_READY(metrics::add(gauge));
   AWAIT_READY(metrics::add(gaugeFail));
+  AWAIT_READY(metrics::add(gaugeConst));
   AWAIT_READY(metrics::add(counter));
 
   // Advance the clock to avoid rate limit.
@@ -244,11 +245,16 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(MetricsTest, Snapshot)
   EXPECT_EQ(1u, values.count("test/gauge"));
   EXPECT_FLOAT_EQ(42.0, values["test/gauge"].as<JSON::Number>().as<double>());
 
+  EXPECT_EQ(1u, values.count("test/gauge_const"));
+  EXPECT_FLOAT_EQ(
+      99.0, values["test/gauge_const"].as<JSON::Number>().as<double>());
+
   EXPECT_EQ(0u, values.count("test/gauge_fail"));
 
   // Remove the metrics and ensure they are no longer in the snapshot.
   AWAIT_READY(metrics::remove(gauge));
   AWAIT_READY(metrics::remove(gaugeFail));
+  AWAIT_READY(metrics::remove(gaugeConst));
   AWAIT_READY(metrics::remove(counter));
 
   // Advance the clock to avoid rate limit.
@@ -269,17 +275,15 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(MetricsTest, Snapshot)
   EXPECT_EQ(0u, values.count("test/counter"));
   EXPECT_EQ(0u, values.count("test/gauge"));
   EXPECT_EQ(0u, values.count("test/gauge_fail"));
+  EXPECT_EQ(0u, values.count("test/gauge_const"));
 
   terminate(process);
   wait(process);
 }
 
 
-// GTEST_IS_THREADSAFE is not defined on Windows. See MESOS-5903.
-TEST_F_TEMP_DISABLED_ON_WINDOWS(MetricsTest, SnapshotTimeout)
+TEST_F(MetricsTest, THREADSAFE_SnapshotTimeout)
 {
-  ASSERT_TRUE(GTEST_IS_THREADSAFE);
-
   UPID upid("metrics", process::address());
 
   Clock::pause();
@@ -510,11 +514,8 @@ TEST_F(MetricsTest, AsyncTimer)
 
 // Tests that the `/metrics/snapshot` endpoint rejects unauthenticated requests
 // when HTTP authentication is enabled.
-// NOTE: GTEST_IS_THREADSAFE is not defined on Windows. See MESOS-5903.
-TEST_F_TEMP_DISABLED_ON_WINDOWS(MetricsTest, SnapshotAuthenticationEnabled)
+TEST_F(MetricsTest, THREADSAFE_SnapshotAuthenticationEnabled)
 {
-  ASSERT_TRUE(GTEST_IS_THREADSAFE);
-
   process::Owned<Authenticator> authenticator(
     new BasicAuthenticator(
         READONLY_HTTP_AUTHENTICATION_REALM, {{"foo", "bar"}}));

@@ -14,6 +14,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+syntax = "proto2";
+
 import "mesos/v1/mesos.proto";
 
 import "mesos/v1/maintenance/maintenance.proto";
@@ -66,7 +68,7 @@ message Call {
 
     GET_MASTER = 17;        // Retrieves the master's information.
 
-    SUBSCRIBE = 18;          // Subscribes the master to receive events.
+    SUBSCRIBE = 18;         // Subscribes the master to receive events.
 
     RESERVE_RESOURCES = 19;
     UNRESERVE_RESOURCES = 20;
@@ -84,7 +86,11 @@ message Call {
 
     GET_QUOTA = 28;
     SET_QUOTA = 29;          // See 'SetQuota' below.
-    REMOVE_QUOTA = 30;
+    REMOVE_QUOTA = 30;       // See 'RemoveQuota' below.
+
+    TEARDOWN = 31;       // See 'Teardown' below.
+
+    MARK_AGENT_GONE = 32; // See 'MarkAgentGone' below.
   }
 
   // Provides a snapshot of the current metrics tracked by the master.
@@ -186,6 +192,27 @@ message Call {
     required string role = 1;
   }
 
+  // Tears down a running framework by shutting down all tasks/executors and
+  // removing the framework.
+  message Teardown {
+    required FrameworkID framework_id = 1;
+  }
+
+  // Mark an agent as gone. This can be used by an operator to assert
+  // that the agent instance has failed and is never coming back (e.g.,
+  // ephemeral instance from cloud provider). The master would shutdown
+  // the agent and send 'TASK_GONE_BY_OPERATOR' updates for all the running
+  // tasks. The persistent volumes/reservations on the agent won't be
+  // accessible anymore.
+  //
+  // NOTE: It is possible that the tasks might still be running
+  // if the operator's assertion was wrong and the agent was partitioned
+  // away from the master. The agent would be shutdown when it tries to
+  // re-register with the master when the partition heals.
+  message MarkAgentGone {
+    required AgentID agent_id = 1;
+  }
+
   optional Type type = 1;
 
   optional GetMetrics get_metrics = 2;
@@ -199,9 +226,11 @@ message Call {
   optional DestroyVolumes destroy_volumes = 10;
   optional UpdateMaintenanceSchedule update_maintenance_schedule = 11;
   optional StartMaintenance start_maintenance = 12;
-  optional StopMaintenance stop_maintenance  = 13;
+  optional StopMaintenance stop_maintenance = 13;
   optional SetQuota set_quota = 14;
   optional RemoveQuota remove_quota = 15;
+  optional Teardown teardown = 16;
+  optional MarkAgentGone mark_agent_gone = 17;
 }
 
 
@@ -306,10 +335,21 @@ message Response {
 
       repeated Resource allocated_resources = 8;
       repeated Resource offered_resources = 9;
+
+      repeated AgentInfo.Capability capabilities = 10;
+
+      message ResourceProvider {
+        required ResourceProviderInfo resource_provider_info = 1;
+      }
+
+      repeated ResourceProvider resource_providers = 11;
     }
 
     // Registered agents.
     repeated Agent agents = 1;
+
+    // Agents which are recovered from registry but not reregistered yet.
+    repeated AgentInfo recovered_agents = 2;
   }
 
   // Information about all the frameworks known to the master at the current
@@ -320,6 +360,13 @@ message Response {
       required FrameworkInfo framework_info = 1;
       required bool active = 2;
       required bool connected = 3;
+
+      // If true, this framework was previously subscribed but hasn't
+      // yet re-subscribed after a master failover. Recovered frameworks
+      // are only reported if one or more agents running a task or
+      // executor for the framework have re-registered after master
+      // failover.
+      required bool recovered = 11;
 
       optional TimeInfo registered_time = 4;
       optional TimeInfo reregistered_time = 5;
@@ -339,9 +386,14 @@ message Response {
     // Frameworks that have been teared down.
     repeated Framework completed_frameworks = 2;
 
-    // Frameworks that have previously subscribed but haven't yet subscribed
-    // after a master failover.
-    repeated FrameworkInfo recovered_frameworks = 3;
+    // This field previously contained frameworks that previously
+    // subscribed but haven't yet re-subscribed after a master failover.
+    // As of Mesos 1.2, this field will always be empty; recovered
+    // frameworks are now reported in the `frameworks` list with the
+    // `recovered` field set to true.
+    //
+    // TODO(neilc): Remove this field in Mesos 2.0.
+    repeated FrameworkInfo recovered_frameworks = 3 [deprecated=true];
   }
 
   // Lists information about all the executors known to the master at the
@@ -354,28 +406,43 @@ message Response {
     }
 
     repeated Executor executors = 1;
-    repeated Executor orphan_executors = 2;
+
+    // As of Mesos 1.3.0, this field is deprecated and will always be empty.
+    //
+    // TODO(neilc): Remove this field in Mesos 2.0.
+    repeated Executor orphan_executors = 2 [deprecated=true];
   }
 
   // Lists information about all the tasks known to the master at the current
   // time. Note that there might be tasks unknown to the master running on
   // partitioned or unsubscribed agents.
   message GetTasks {
-    // Tasks that are an enqueued on the master waiting (e.g., authorizing)
+    // Tasks that are enqueued on the master waiting (e.g., authorizing)
     // to be launched.
     repeated Task pending_tasks = 1;
 
-    // Tasks that have been forwarded to the agent for launch. This includes
-    // tasks that are running and reached terminal state.
+    // Tasks that have been forwarded to the agent for launch. This
+    // includes tasks that are staging or running; it also includes
+    // tasks that have reached a terminal state but the terminal status
+    // update has not yet been acknowledged by the scheduler.
     repeated Task tasks = 2;
+
+    // Tasks that were running on agents that have become partitioned
+    // from the master. If/when the agent is no longer partitioned,
+    // tasks running on that agent will no longer be unreachable (they
+    // will either be running or completed). Note that the master only
+    // stores a limited number of unreachable tasks; information about
+    // unreachable tasks is also not preserved across master failover.
+    repeated Task unreachable_tasks = 5;
 
     // Tasks that have reached terminal state and have all their updates
     // acknowledged by the scheduler.
     repeated Task completed_tasks = 3;
 
-    // Tasks belonging to frameworks that have not yet re-subscribed with
-    // master (e.g., immediately after master failover).
-    repeated Task orphan_tasks = 4;
+    // As of Mesos 1.3.0, this field is deprecated and will always be empty.
+    //
+    // TODO(neilc): Remove this field in Mesos 2.0.
+    repeated Task orphan_tasks = 4 [deprecated=true];
   }
 
   // Provides information about every role that is on the role whitelist (if
@@ -444,6 +511,18 @@ message Event {
     TASK_UPDATED = 3; // See `TaskUpdated` below.
     AGENT_ADDED = 4; // See `AgentAdded` below.
     AGENT_REMOVED = 5; // See `AgentRemoved` below.
+    FRAMEWORK_ADDED = 6; // See `FrameworkAdded` below.
+    FRAMEWORK_UPDATED = 7; // See `FrameworkUpdated` below.
+    FRAMEWORK_REMOVED = 8; // See `FrameworkRemoved` below.
+
+    // Periodic message sent by the master to the subscriber according to
+    // 'Subscribed.heartbeat_interval_seconds'. If the subscriber does not
+    // receive any events (including heartbeats) for an extended period of
+    // time (e.g., 5 x heartbeat_interval_seconds), it is likely that the
+    // connection is lost or there is a network partition. In that case,
+    // the subscriber should close the existing subscription connection and
+    // resubscribe using a backoff strategy.
+    HEARTBEAT = 9;
 
     // TODO(vinod): Fill in more events.
   }
@@ -453,6 +532,10 @@ message Event {
     // Snapshot of the entire cluster state. Further updates to the
     // cluster state are sent as separate events on the stream.
     optional Response.GetState get_state = 1;
+
+    // This value will be set if the master is sending heartbeats to
+    // subscribers. See the comment above on 'HEARTBEAT' for more details.
+    optional double heartbeat_interval_seconds = 2;
   }
 
   // Forwarded by the master when a task becomes known to it. This can happen
@@ -466,12 +549,32 @@ message Event {
   message TaskUpdated {
     required FrameworkID framework_id = 1;
 
-		// This is the status of the task corresponding to the last
-		// status update acknowledged by the scheduler.
+    // This is the status of the task corresponding to the last
+    // status update acknowledged by the scheduler.
     required TaskStatus status = 2;
 
     // This is the latest state of the task according to the agent.
     required TaskState state = 3;
+  }
+
+
+  // Forwarded by the master when a framework becomes known to it.
+  // This can happen when a new framework registers with the master.
+  message FrameworkAdded {
+    required Response.GetFrameworks.Framework framework = 1;
+  }
+
+  // Forwarded by the master when a framework re-registers with the master
+  // upon a disconnection (network error) or upon a master failover.
+  message FrameworkUpdated {
+    required Response.GetFrameworks.Framework framework = 1;
+  }
+
+  // Forwarded by the master when a framework is removed. This can happen when
+  // a framework is explicitly teardown by the operator or if it fails to
+  // re-register with the master within the failover timeout.
+  message FrameworkRemoved {
+    required FrameworkInfo framework_info = 1;
   }
 
   // Forwarded by the master when an agent becomes known to it.
@@ -481,10 +584,8 @@ message Event {
     required Response.GetAgents.Agent agent = 1;
   }
 
-  // Forwarded by the master when an agent is removed.
-  // This can happen when an agent does not re-register
-  // within `--agent_reregister_timeout` upon a master failover,
-  // or when the agent is scheduled for maintenance.
+  // Forwarded by the master when an agent is removed. This
+  // can happen when the agent is scheduled for maintenance.
   //
   // NOTE: It's possible that an agent might become
   // active once it has been removed, i.e. if the master
@@ -501,4 +602,7 @@ message Event {
   optional TaskUpdated task_updated = 4;
   optional AgentAdded agent_added = 5;
   optional AgentRemoved agent_removed = 6;
+  optional FrameworkAdded framework_added = 7;
+  optional FrameworkUpdated framework_updated = 8;
+  optional FrameworkRemoved framework_removed = 9;
 }

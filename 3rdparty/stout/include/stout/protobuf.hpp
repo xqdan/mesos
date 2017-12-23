@@ -27,6 +27,7 @@
 #include <vector>
 
 #include <google/protobuf/descriptor.h>
+#include <google/protobuf/descriptor.pb.h>
 #include <google/protobuf/message.h>
 #include <google/protobuf/repeated_field.h>
 
@@ -45,6 +46,8 @@
 #include <stout/try.hpp>
 
 #include <stout/os/close.hpp>
+#include <stout/os/int_fd.hpp>
+#include <stout/os/lseek.hpp>
 #include <stout/os/open.hpp>
 #include <stout/os/read.hpp>
 #include <stout/os/write.hpp>
@@ -60,7 +63,7 @@ namespace protobuf {
 // first writing out the length of the protobuf followed by the
 // contents.
 // NOTE: On error, this may have written partial data to the file.
-inline Try<Nothing> write(int fd, const google::protobuf::Message& message)
+inline Try<Nothing> write(int_fd fd, const google::protobuf::Message& message)
 {
   if (!message.IsInitialized()) {
     return Error(message.InitializationErrorString() +
@@ -76,26 +79,16 @@ inline Try<Nothing> write(int fd, const google::protobuf::Message& message)
     return Error("Failed to write size: " + result.error());
   }
 
+#ifdef __WINDOWS__
+  if (!message.SerializeToFileDescriptor(fd.crt())) {
+#else
   if (!message.SerializeToFileDescriptor(fd)) {
+#endif
     return Error("Failed to write/serialize message");
   }
 
   return Nothing();
 }
-
-
-#ifdef __WINDOWS__
-// NOTE: Ordinarily this would go in a Windows-specific header; we put it here
-// to avoid complex forward declarations.
-inline Try<Nothing> write(
-    HANDLE handle,
-    const google::protobuf::Message& message)
-{
-  return write(
-      _open_osfhandle(reinterpret_cast<intptr_t>(handle), O_WRONLY), message);
-}
-#endif // __WINDOWS__
-
 
 // Write out the given sequence of protobuf messages to the
 // specified file descriptor by repeatedly invoking write
@@ -103,8 +96,7 @@ inline Try<Nothing> write(
 // NOTE: On error, this may have written partial data to the file.
 template <typename T>
 Try<Nothing> write(
-    int fd,
-    const google::protobuf::RepeatedPtrField<T>& messages)
+    int_fd fd, const google::protobuf::RepeatedPtrField<T>& messages)
 {
   foreach (const T& message, messages) {
     Try<Nothing> result = write(fd, message);
@@ -120,16 +112,9 @@ Try<Nothing> write(
 template <typename T>
 Try<Nothing> write(const std::string& path, const T& t)
 {
-  int operation_flags = O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC;
-#ifdef __WINDOWS__
-  // NOTE: Windows does automatic linefeed conversions in I/O on text files.
-  // We include the `_O_BINARY` flag here to avoid this.
-  operation_flags |= _O_BINARY;
-#endif // __WINDOWS__
-
-  Try<int> fd = os::open(
+  Try<int_fd> fd = os::open(
       path,
-      operation_flags,
+      O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC,
       S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
 
   if (fd.isError()) {
@@ -151,16 +136,9 @@ inline Try<Nothing> append(
     const std::string& path,
     const google::protobuf::Message& message)
 {
-  int operation_flags = O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC;
-#ifdef __WINDOWS__
-  // NOTE: Windows does automatic linefeed conversions in I/O on text files.
-  // We include the `_O_BINARY` flag here to avoid this.
-  operation_flags |= _O_BINARY;
-#endif // __WINDOWS__
-
-  Try<int> fd = os::open(
+  Try<int_fd> fd = os::open(
       path,
-      operation_flags,
+      O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC,
       S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
 
   if (fd.isError()) {
@@ -184,7 +162,14 @@ Try<T> deserialize(const std::string& value)
   T t;
   (void) static_cast<google::protobuf::Message*>(&t);
 
-  google::protobuf::io::ArrayInputStream stream(value.data(), value.size());
+  // Verify that the size of `value` fits into `ArrayInputStream`'s
+  // constructor. The maximum size of a proto2 message is 64 MB, so it is
+  // unlikely that we will hit this limit, but since an arbitrary string can be
+  // passed in, we include this check to be safe.
+  CHECK_LE(value.size(), static_cast<size_t>(std::numeric_limits<int>::max()));
+  google::protobuf::io::ArrayInputStream stream(
+      value.data(),
+      static_cast<int>(value.size()));
   if (!t.ParseFromZeroCopyStream(&stream)) {
     return Error("Failed to deserialize " + t.GetDescriptor()->full_name());
   }
@@ -214,16 +199,18 @@ namespace internal {
 template <typename T>
 struct Read
 {
-  Result<T> operator()(int fd, bool ignorePartial, bool undoFailed)
+  Result<T> operator()(int_fd fd, bool ignorePartial, bool undoFailed)
   {
     off_t offset = 0;
 
     if (undoFailed) {
       // Save the offset so we can re-adjust if something goes wrong.
-      offset = lseek(fd, 0, SEEK_CUR);
-      if (offset == -1) {
-        return ErrnoError("Failed to lseek to SEEK_CUR");
+      Try<off_t> lseek = os::lseek(fd, offset, SEEK_CUR);
+      if (lseek.isError()) {
+        return Error(lseek.error());
       }
+
+      offset = lseek.get();
     }
 
     uint32_t size;
@@ -231,7 +218,7 @@ struct Read
 
     if (result.isError()) {
       if (undoFailed) {
-        lseek(fd, offset, SEEK_SET);
+        os::lseek(fd, offset, SEEK_SET);
       }
       return Error("Failed to read size: " + result.error());
     } else if (result.isNone()) {
@@ -240,7 +227,7 @@ struct Read
       // Hit EOF unexpectedly.
       if (undoFailed) {
         // Restore the offset to before the size read.
-        lseek(fd, offset, SEEK_SET);
+        os::lseek(fd, offset, SEEK_SET);
       }
       if (ignorePartial) {
         return None();
@@ -260,14 +247,14 @@ struct Read
     if (result.isError()) {
       if (undoFailed) {
         // Restore the offset to before the size read.
-        lseek(fd, offset, SEEK_SET);
+        os::lseek(fd, offset, SEEK_SET);
       }
       return Error("Failed to read message: " + result.error());
     } else if (result.isNone() || result.get().size() < size) {
       // Hit EOF unexpectedly.
       if (undoFailed) {
         // Restore the offset to before the size read.
-        lseek(fd, offset, SEEK_SET);
+        os::lseek(fd, offset, SEEK_SET);
       }
       if (ignorePartial) {
         return None();
@@ -281,13 +268,20 @@ struct Read
     // must outlive the creation of ArrayInputStream.
     const std::string& data = result.get();
 
+    // Verify that the size of `data` fits into `ArrayInputStream`'s
+    // constructor. The maximum size of a proto2 message is 64 MB, so it is
+    // unlikely that we will hit this limit, but since an arbitrary string can
+    // be passed in, we include this check to be safe.
+    CHECK_LE(data.size(), static_cast<size_t>(std::numeric_limits<int>::max()));
     T message;
-    google::protobuf::io::ArrayInputStream stream(data.data(), data.size());
+    google::protobuf::io::ArrayInputStream stream(
+        data.data(),
+        static_cast<int>(data.size()));
 
     if (!message.ParseFromZeroCopyStream(&stream)) {
       if (undoFailed) {
         // Restore the offset to before the size read.
-        lseek(fd, offset, SEEK_SET);
+        os::lseek(fd, offset, SEEK_SET);
       }
       return Error("Failed to deserialize message");
     }
@@ -306,7 +300,7 @@ template <typename T>
 struct Read<google::protobuf::RepeatedPtrField<T>>
 {
   Result<google::protobuf::RepeatedPtrField<T>> operator()(
-      int fd, bool ignorePartial, bool undoFailed)
+      int_fd fd, bool ignorePartial, bool undoFailed)
   {
     google::protobuf::RepeatedPtrField<T> result;
     for (;;) {
@@ -337,27 +331,10 @@ struct Read<google::protobuf::RepeatedPtrField<T>>
 // If 'undoFailed' is true, failed read attempts will restore the file
 // read/write file offset towards the initial callup position.
 template <typename T>
-Result<T> read(int fd, bool ignorePartial = false, bool undoFailed = false)
+Result<T> read(int_fd fd, bool ignorePartial = false, bool undoFailed = false)
 {
   return internal::Read<T>()(fd, ignorePartial, undoFailed);
 }
-
-
-#ifdef __WINDOWS__
-// NOTE: Ordinarily this would go in a Windows-specific header; we put it here
-// to avoid complex forward declarations.
-template <typename T>
-Result<T> read(
-    HANDLE handle,
-    bool ignorePartial = false,
-    bool undoFailed = false)
-{
-  return read<T>(
-      _open_osfhandle(reinterpret_cast<intptr_t>(handle), O_RDONLY),
-      ignorePartial,
-      undoFailed);
-}
-#endif // __WINDOWS__
 
 
 // A wrapper function that wraps the above read() with open and
@@ -365,16 +342,9 @@ Result<T> read(
 template <typename T>
 Result<T> read(const std::string& path)
 {
-  int operation_flags = O_RDONLY | O_CLOEXEC;
-#ifdef __WINDOWS__
-  // NOTE: Windows does automatic linefeed conversions in I/O on text files.
-  // We include the `_O_BINARY` flag here to avoid this.
-  operation_flags |= _O_BINARY;
-#endif // __WINDOWS__
-
-  Try<int> fd = os::open(
+  Try<int_fd> fd = os::open(
       path,
-      operation_flags,
+      O_RDONLY | O_CLOEXEC,
       S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
 
   if (fd.isError()) {
@@ -460,7 +430,19 @@ struct Parser : boost::static_visitor<Try<Nothing>>
           field->enum_type()->FindValueByName(string.value);
 
         if (descriptor == nullptr) {
-          return Error("Failed to find enum for '" + string.value + "'");
+          if (field->is_required()) {
+            return Error("Failed to find enum for '" + string.value + "'");
+          }
+
+          // Unrecognized enum value will be discarded if this is not a
+          // required enum field, which makes the field's `has..` accessor
+          // return false and its getter return the first value listed in
+          // the enum definition, or the default value if one is specified.
+          //
+          // This is the deserialization behavior of proto2, see the link
+          // below for details:
+          // https://developers.google.com/protocol-buffers/docs/proto#updating
+          break;
         }
 
         if (field->is_repeated()) {
@@ -708,8 +690,8 @@ struct Protobuf : Representation<google::protobuf::Message>
 
 
 // `json` function for protobuf messages. Refer to `jsonify.hpp` for details.
-// TODO(mpark): This currently uses the default value for optional fields with
-// a default that are not set, but we may want to revisit this decision.
+// TODO(mpark): This currently uses the default value for optional fields
+// that are not deprecated, but we may want to revisit this decision.
 inline void json(ObjectWriter* writer, const Protobuf& protobuf)
 {
   using google::protobuf::FieldDescriptor;
@@ -733,8 +715,9 @@ inline void json(ObjectWriter* writer, const Protobuf& protobuf)
         // Has repeated field with members, output as JSON.
         fields.push_back(field);
       }
-    } else if (reflection->HasField(message, field) ||
-               field->has_default_value()) {
+    } else if (
+        reflection->HasField(message, field) ||
+        (field->has_default_value() && !field->options().deprecated())) {
       // Field is set or has default, output as JSON.
       fields.push_back(field);
     }
@@ -842,8 +825,8 @@ inline void json(ObjectWriter* writer, const Protobuf& protobuf)
 }
 
 
-// TODO(bmahler): This currently uses the default value for optional
-// fields but we may want to revisit this decision.
+// TODO(bmahler): This currently uses the default value for optional fields
+// that are not deprecated, but we may want to revisit this decision.
 inline Object protobuf(const google::protobuf::Message& message)
 {
   Object object;
@@ -864,8 +847,9 @@ inline Object protobuf(const google::protobuf::Message& message)
         // Has repeated field with members, output as JSON.
         fields.push_back(field);
       }
-    } else if (reflection->HasField(message, field) ||
-               field->has_default_value()) {
+    } else if (
+        reflection->HasField(message, field) ||
+        (field->has_default_value() && !field->options().deprecated())) {
       // Field is set or has default, output as JSON.
       fields.push_back(field);
     }
@@ -988,7 +972,7 @@ inline Object protobuf(const google::protobuf::Message& message)
           break;
         case google::protobuf::FieldDescriptor::TYPE_MESSAGE:
           object.values[field->name()] =
-              protobuf(reflection->GetMessage(message, field));
+            protobuf(reflection->GetMessage(message, field));
           break;
         case google::protobuf::FieldDescriptor::TYPE_ENUM:
           object.values[field->name()] =

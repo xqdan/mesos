@@ -268,7 +268,7 @@ Try<Owned<Subsystem>> NetClsSubsystem::create(
         return Error("The secondary handle has to be a non-zero value.");
       }
 
-      Try<uint16_t> upper =  numify<uint16_t>(range[1]);
+      Try<uint16_t> upper = numify<uint16_t>(range[1]);
       if (upper.isError()) {
         return Error(
             "Failed to parse the upper bound of range of secondary handles '" +
@@ -448,8 +448,8 @@ Future<Nothing> NetClsSubsystem::cleanup(
 
 
 Result<NetClsHandle> NetClsSubsystem::recoverHandle(
-    const std::string& hierarchy,
-    const std::string& cgroup)
+    const string& hierarchy,
+    const string& cgroup)
 {
   Try<uint32_t> classid = cgroups::net_cls::classid(hierarchy, cgroup);
   if (classid.isError()) {

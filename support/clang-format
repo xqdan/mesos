@@ -34,7 +34,8 @@ Cpp11BracedListStyle: true
 DerivePointerAlignment: false
 DisableFormat:   false
 ExperimentalAutoDetectBinPacking: false
-ForEachMacros:   [ foreach, foreachkey, foreachvalue, foreachpair ]
+FixNamespaceComments: false
+ForEachMacros:   [ foreach, foreachkey, foreachvalue, foreachpair, synchronized ]
 IncludeCategories:
   - Regex:           '^<.*\.h>'
     Priority:        1

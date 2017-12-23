@@ -30,6 +30,7 @@
 #include <stout/path.hpp>
 #include <stout/strings.hpp>
 
+#include <stout/os/constants.hpp>
 #include <stout/os/mkdir.hpp>
 
 #include "uri/fetchers/curl.hpp"
@@ -78,7 +79,8 @@ string CurlFetcherPlugin::name() const
 
 Future<Nothing> CurlFetcherPlugin::fetch(
     const URI& uri,
-    const string& directory) const
+    const string& directory,
+    const Option<string>& data) const
 {
   // TODO(jieyu): Validate the given URI.
 
@@ -109,7 +111,7 @@ Future<Nothing> CurlFetcherPlugin::fetch(
   Try<Subprocess> s = subprocess(
       "curl",
       argv,
-      Subprocess::PATH("/dev/null"),
+      Subprocess::PATH(os::DEV_NULL),
       Subprocess::PIPE(),
       Subprocess::PIPE());
 
@@ -125,7 +127,7 @@ Future<Nothing> CurlFetcherPlugin::fetch(
         Future<Option<int>>,
         Future<string>,
         Future<string>>& t) -> Future<Nothing> {
-      Future<Option<int>> status = std::get<0>(t);
+      const Future<Option<int>>& status = std::get<0>(t);
       if (!status.isReady()) {
         return Failure(
             "Failed to get the exit status of the curl subprocess: " +
@@ -137,7 +139,7 @@ Future<Nothing> CurlFetcherPlugin::fetch(
       }
 
       if (status->get() != 0) {
-        Future<string> error = std::get<2>(t);
+        const Future<string>& error = std::get<2>(t);
         if (!error.isReady()) {
           return Failure(
               "Failed to perform 'curl'. Reading stderr failed: " +
@@ -147,7 +149,7 @@ Future<Nothing> CurlFetcherPlugin::fetch(
         return Failure("Failed to perform 'curl': " + error.get());
       }
 
-      Future<string> output = std::get<1>(t);
+      const Future<string>& output = std::get<1>(t);
       if (!output.isReady()) {
         return Failure(
             "Failed to read stdout from 'curl': " +

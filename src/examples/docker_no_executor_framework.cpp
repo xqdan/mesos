@@ -39,6 +39,10 @@ using std::vector;
 const int32_t CPUS_PER_TASK = 1;
 const int32_t MEM_PER_TASK = 32;
 
+constexpr char FRAMEWORK_NAME[] = "Docker No Executor Framework (C++)";
+constexpr char FRAMEWORK_PRINCIPAL[] = "no-executor-framework-cpp";
+
+
 class DockerNoExecutorScheduler : public Scheduler
 {
 public:
@@ -139,11 +143,13 @@ public:
 
     cout << "Task " << taskId << " is in state " << status.state() << endl;
 
-    if (status.state() == TASK_FINISHED)
+    if (status.state() == TASK_FINISHED) {
       tasksFinished++;
+    }
 
-    if (tasksFinished == totalTasks)
+    if (tasksFinished == totalTasks) {
       driver->stop();
+    }
   }
 
   virtual void frameworkMessage(SchedulerDriver* driver,
@@ -178,8 +184,10 @@ int main(int argc, char** argv)
 
   FrameworkInfo framework;
   framework.set_user(""); // Have Mesos fill in the current user.
-  framework.set_name("Docker No Executor Framework (C++)");
+  framework.set_name(FRAMEWORK_NAME);
   framework.set_checkpoint(true);
+  framework.add_capabilities()->set_type(
+      FrameworkInfo::Capability::RESERVATION_REFINEMENT);
 
   MesosSchedulerDriver* driver;
   if (os::getenv("MESOS_AUTHENTICATE_FRAMEWORKS").isSome()) {
@@ -207,10 +215,9 @@ int main(int argc, char** argv)
     driver = new MesosSchedulerDriver(
         &scheduler, framework, argv[1], credential);
   } else {
-    framework.set_principal("no-executor-framework-cpp");
+    framework.set_principal(FRAMEWORK_PRINCIPAL);
 
-    driver = new MesosSchedulerDriver(
-        &scheduler, framework, argv[1]);
+    driver = new MesosSchedulerDriver(&scheduler, framework, argv[1]);
   }
 
   int status = driver->run() == DRIVER_STOPPED ? 0 : 1;

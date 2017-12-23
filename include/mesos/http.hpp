@@ -21,15 +21,30 @@
 
 namespace mesos {
 
-const char APPLICATION_JSON[] = "application/json";
 const char APPLICATION_PROTOBUF[] = "application/x-protobuf";
+const char APPLICATION_JSON[] = "application/json";
 
-// Possible content-types that can be used as responses for
-// the Mesos HTTP API.
+
+// The content-type used for streaming requests/responses.
+const char APPLICATION_RECORDIO[] = "application/recordio";
+
+
+// The header used by the client/server to specify the content-type
+// of messages in a streaming request/response.
+const char MESSAGE_CONTENT_TYPE[] = "Message-Content-Type";
+
+
+// The header used by the client to specify acceptable content-type
+// of messages in a streaming response.
+const char MESSAGE_ACCEPT[] = "Message-Accept";
+
+
+// Possible content-types that can be used for requests to the Mesos HTTP API.
 enum class ContentType
 {
   PROTOBUF,
-  JSON
+  JSON,
+  RECORDIO
 };
 
 

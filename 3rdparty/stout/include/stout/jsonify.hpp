@@ -13,6 +13,11 @@
 #ifndef __STOUT_JSONIFY__
 #define __STOUT_JSONIFY__
 
+#ifndef __WINDOWS__
+#include <locale.h>
+#endif // __WINDOWS__
+
+#include <clocale>
 #include <cstddef>
 #include <functional>
 #include <ostream>
@@ -21,6 +26,7 @@
 #include <type_traits>
 #include <utility>
 
+#include <stout/check.hpp>
 #include <stout/result_of.hpp>
 #include <stout/strings.hpp>
 
@@ -33,12 +39,14 @@
 // argument dependent lookup. That is, we will search for, and use a free
 // function named `json` in the same namespace as `T`.
 //
+// NOTE: This relationship is similar to `boost::hash` and `hash_value`.
+//
 // IMPORTANT: The output stream must not be exception-enabled. This is because
 // the writer definitions below insert into the output stream in their
 // destructors.
 //
-// NOTE: This relationship is similar to `boost::hash` and `hash_value`.
-
+// Refer to https://github.com/apache/mesos/tree/master/3rdparty/stout#jsonify
+// for more information.
 
 // Forward declaration of `JSON::Proxy`.
 namespace JSON { class Proxy; }
@@ -48,6 +56,67 @@ template <typename T>
 JSON::Proxy jsonify(const T&);
 
 namespace JSON {
+
+namespace internal {
+
+/**
+ * This object changes the current thread's locale to the default "C"
+ * locale for number printing purposes. This prevents, for example,
+ * commas from appearing in printed numbers instead of decimal points.
+ *
+ * NOTE: This object should only be used to guard synchronous code.
+ * If multiple blocks of code need to enforce the default locale,
+ * each block should utilize this object.
+ */
+// TODO(josephw): Consider pulling this helper into a separate header.
+class ClassicLocale
+{
+#ifdef __WINDOWS__
+public:
+  ClassicLocale()
+  {
+    // We will only change the locale for this thread
+    // and save the previous state of the thread's locale.
+    original_per_thread_ = _configthreadlocale(_ENABLE_PER_THREAD_LOCALE);
+
+    // NOTE: We must make a copy of the return value as it points
+    // to global or shared memory. Future calls to `setlocale` will
+    // invalidate the memory location.
+    original_locale_ = setlocale(LC_NUMERIC, "C");
+  }
+
+  ~ClassicLocale()
+  {
+    setlocale(LC_NUMERIC, original_locale_.c_str());
+    _configthreadlocale(original_per_thread_);
+  }
+
+private:
+  int original_per_thread_;
+  std::string original_locale_;
+#else
+public:
+  ClassicLocale()
+  {
+    c_locale_ = newlocale(LC_NUMERIC_MASK, "C", nullptr);
+    original_locale_ = uselocale(c_locale_);
+  }
+
+  ~ClassicLocale()
+  {
+    uselocale(original_locale_);
+    CHECK(c_locale_ != 0);
+    freelocale(c_locale_);
+  }
+
+private:
+  locale_t original_locale_;
+  locale_t c_locale_;
+#endif // __WINDOWS__
+};
+
+} // namespace internal {
+
 
 // The result of `jsonify`. This is a light-weight proxy object that can either
 // be implicitly converted to a `std::string`, or directly inserted into an
@@ -62,6 +131,9 @@ class Proxy
 public:
   operator std::string() &&
   {
+    // Needed to set C locale and therefore creating proper JSON output.
+    internal::ClassicLocale guard;
+
     std::ostringstream stream;
     stream << std::move(*this);
     return stream.str();
@@ -94,6 +166,9 @@ private:
 
 inline std::ostream& operator<<(std::ostream& stream, Proxy&& that)
 {
+  // Needed to set C locale and therefore creating proper JSON output.
+  internal::ClassicLocale guard;
+
   that.write_(&stream);
   return stream;
 }
@@ -269,7 +344,7 @@ public:
     switch (c) {
       case '"' : *stream_ << "\\\""; break;
       case '\\': *stream_ << "\\\\"; break;
-      case '/' : *stream_ <<  "\\/"; break;
+      case '/' : *stream_ << "\\/"; break;
       case '\b': *stream_ << "\\b"; break;
       case '\f': *stream_ << "\\f"; break;
       case '\n': *stream_ << "\\n"; break;
@@ -369,6 +444,24 @@ public:
 private:
   std::ostream* stream_;
   std::size_t count_;
+};
+
+
+class NullWriter
+{
+public:
+  NullWriter(std::ostream* stream) : stream_(stream) {}
+
+  NullWriter(const NullWriter&) = delete;
+  NullWriter(NullWriter&&) = delete;
+
+  ~NullWriter() { *stream_ << "null"; }
+
+  NullWriter& operator=(const NullWriter&) = delete;
+  NullWriter& operator=(NullWriter&&) = delete;
+
+private:
+  std::ostream* stream_;
 };
 
 
@@ -574,6 +667,10 @@ public:
         writer_.object_writer.~ObjectWriter();
         break;
       }
+      case NULL_WRITER: {
+        writer_.null_writer.~NullWriter();
+        break;
+      }
     }
   }
 
@@ -612,6 +709,13 @@ public:
     return &writer_.object_writer;
   }
 
+  operator NullWriter*() &&
+  {
+    new (&writer_.null_writer) NullWriter(stream_);
+    type_ = NULL_WRITER;
+    return &writer_.null_writer;
+  }
+
 private:
   enum Type
   {
@@ -619,7 +723,8 @@ private:
     NUMBER_WRITER,
     STRING_WRITER,
     ARRAY_WRITER,
-    OBJECT_WRITER
+    OBJECT_WRITER,
+    NULL_WRITER
   };
 
   union Writer
@@ -631,6 +736,7 @@ private:
     StringWriter string_writer;
     ArrayWriter array_writer;
     ObjectWriter object_writer;
+    NullWriter null_writer;
   };
 
   std::ostream* stream_;

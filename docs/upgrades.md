@@ -43,20 +43,157 @@ We categorize the changes as follows:
   </thead>
 <tr>
   <td style="word-wrap: break-word; overflow-wrap: break-word;"><!--Version-->
-  1.1.x
+  1.5.x
+  </td>
+
+  <td style="word-wrap: break-word; overflow-wrap: break-word;"><!--Mesos Core-->
+    <ul style="padding-left:10px;">
+      <li>C <a href="#1-5-x-task-starting">Built-in executors send a TASK_STARTING update</a></li>
+      <li>A <a href="#1-5-x-network-ports-isolator">Network ports isolator</a></li>
+      <li>C <a href="#1-5-x-relative-disk-source-root-path">Relative source root paths for disk resources</a></li>
+    </ul>
+  </td>
+
+  <td style="word-wrap: break-word; overflow-wrap: break-word;"><!--Flags-->
+    <ul style="padding-left:10px;">
+      <li>A <a href="#1-5-x-network-ports-isolator">container_ports_watch_interval</a></li>
+      <li>A <a href="#1-5-x-network-ports-isolator">check_agent_port_range_only</a></li>
+      <li>D <a href="#1-5-x-executor-secret-key">executor_secret_key</a></li>
+    </ul>
+  </td>
+
+  <td style="word-wrap: break-word; overflow-wrap: break-word;"><!--Framework API-->
+    <ul style="padding-left:10px;">
+      <li>A <a href="#1-5-x-task-resource-limitation">Added the TaskStatus.limitation message</a></li>
+    </ul>
+  </td>
+
+  <td style="word-wrap: break-word; overflow-wrap: break-word;"><!--Module API-->
+    <ul style="padding-left:10px;">
+    </ul>
+  </td>
+
+  <td style="word-wrap: break-word; overflow-wrap: break-word;"><!--Endpoints-->
+    <ul style="padding-left:10px;">
+      <li>A <a href="#1-5-x-get-containers">Allowed to view nested/standalone containers</a></li>
+    </ul>
+  </td>
+
+</tr>
+
+<tr>
+  <td style="word-wrap: break-word; overflow-wrap: break-word;"><!--Version-->
+  1.4.x
+  </td>
+
+  <td style="word-wrap: break-word; overflow-wrap: break-word;"><!--Mesos Core-->
+    <ul style="padding-left:10px;">
+      <li>A <a href="#1-4-x-ambient-capabilities">Container capabilities are made ambient if supported</a></li>
+      <li>A <a href="#1-4-x-bounding-capabilities">Support for explicit bounding capabilities</a></li>
+      <li>C <a href="#1-4-x-agent-recovery">Agent recovery post reboot</a></li>
+      <li>C <a href="#1-4-x-xfs-no-enforce">XFS disk isolator support for not enforcing disk limits</a></li>
+    </ul>
+  </td>
+
+  <td style="word-wrap: break-word; overflow-wrap: break-word;"><!--Flags-->
+    <ul style="padding-left:10px;">
+      <li>A <a href="#1-4-x-agent-capabilities-flags">effective_capabilities</a></li>
+      <li>A <a href="#1-4-x-agent-capabilities-flags">bounding-capabilities</a></li>
+      <li>D <a href="#1-4-x-agent-capabilities-flags">allowed-capabilities</a></li>
+    </ul>
+  </td>
+
+  <td style="word-wrap: break-word; overflow-wrap: break-word;"><!--Framework API-->
+    <ul style="padding-left:10px;">
+      <li>A <a href="#1-4-x-bounding-capabilities">Support for explicit setting bounding capabilities</a></li>
+      <li>D <a href="#1-4-x-linuxinfo-capabilities">LinuxInfo.effective_capabilities deprecates LinuxInfo.capabilities</a></li>
+      <li>C <a href="#1-4-x-mesos-library">`Resources` class in the internal Mesos C++ library only supports post-`RESERVATION_REFINEMENT` format</a></li>
+    </ul>
+  </td>
+
+  <td style="word-wrap: break-word; overflow-wrap: break-word;"><!--Module API-->
+    <ul style="padding-left:10px;">
+      <li>C <a href="#1-4-x-allocator-update-slave">Changed semantics of Allocator::updateSlave</a></li>
+    </ul>
+  </td>
+
+  <td style="word-wrap: break-word; overflow-wrap: break-word;"><!--Endpoints-->
+    <ul style="padding-left:10px;">
+    </ul>
+  </td>
+
+</tr>
+<tr>
+  <td style="word-wrap: break-word; overflow-wrap: break-word;"><!--Version-->
+  1.3.x
   </td>
   <td style="word-wrap: break-word; overflow-wrap: break-word;"><!--Mesos Core-->
+    <ul style="padding-left:10px;">
+      <li>R <a href="#1-3-x-disallow-old-agents">Prevent registration by old Mesos agents</a></li>
+    </ul>
   </td>
   <td style="word-wrap: break-word; overflow-wrap: break-word;"><!--Flags-->
+    <ul style="padding-left:10px;">
+      <li>R <a href="#1-3-x-setquota-removequota-acl">--acls (set_quotas and remove_quotas)</a></li>
+      <li>R <a href="#1-3-x-shutdown-framework-acl">--acls (shutdown_frameworks)</a></li>
+      <li>A <a href="#1-3-x-executor-authentication">authenticate_http_executors</a></li>
+      <li>A <a href="#1-3-x-executor-authentication">executor_secret_key</a></li>
+    </ul>
   </td>
   <td style="word-wrap: break-word; overflow-wrap: break-word;"><!--Framework API-->
+    <ul style="padding-left:10px;">
+      <li>A <a href="#1-3-x-multi-role-support">MULTI_ROLE support</a></li>
+      <li>D <a href="#1-3-x-framework-info-role">FrameworkInfo.roles deprecates FrameworkInfo.role</a></li>
+    </ul>
+  </td>
+  <td style="word-wrap: break-word; overflow-wrap: break-word;"><!--Module API-->
+    <ul style="padding-left:10px;">
+      <li>C <a href="#1-3-x-allocator-interface-change">Allocator MULTI_ROLE interface changes</a></li>
+    </ul>
+  </td>
+  <td style="word-wrap: break-word; overflow-wrap: break-word;"><!--Endpoints-->
+    <ul style="padding-left:10px;">
+      <li>D <a href="#1-3-x-endpoints-roles">MULTI_ROLE deprecates 'role' field in endpoints</a></li>
+    </ul>
+  </td>
+</tr>
+<tr>
+  <td style="word-wrap: break-word; overflow-wrap: break-word;"><!--Version-->
+  1.2.x
+  </td>
+  <td style="word-wrap: break-word; overflow-wrap: break-word;"><!--Mesos Core-->
+    <ul style="padding-left:10px;">
+      <li>R <a href="#1-2-1-disallow-old-agents">Prevent registration by old Mesos agents</a></li>
+    </ul>
+  </td>
+  <td style="word-wrap: break-word; overflow-wrap: break-word;"><!--Flags-->
+    <ul style="padding-left:10px;">
+      <li>A <a href="#1-2-x-heartbeat-flag">http_heartbeat_interval</a></li>
+      <li>A <a href="#1-2-x-backend-flag">image_provisioner_backend</a></li>
+      <li>A <a href="#1-2-x-unreachable-flag">max_unreachable_tasks_per_framework</a></li>
+    </ul>
+  </td>
+  <td style="word-wrap: break-word; overflow-wrap: break-word;"><!--Framework API-->
+    <ul style="padding-left:10px;">
+      <li>A <a href="#1-2-x-revive-suppress">Revive and Suppress v1 scheduler Calls</a></li>
+    </ul>
   </td>
   <td style="word-wrap: break-word; overflow-wrap: break-word;"><!--Module API-->
     <ul style="padding-left:10px;">
       <li>C <a href="#1-2-x-container-logger-interface">Container Logger prepare method</a></li>
+      <li>C <a href="#1-2-x-allocator-module-changes">Allocator module changes</a></li>
+      <li>A <a href="#1-2-x-new-authz-actions">New Authorizer module actions</a></li>
+      <li>D <a href="#1-2-x-renamed-authz-actions">Renamed Authorizer module actions (deprecated old aliases)</a></li>
+      <li>R <a href="#1-2-x-removed-hooks">Removed slavePreLaunchDockerEnvironmentDecorator and slavePreLaunchDockerHook</a></li>
     </ul>
   </td>
   <td style="word-wrap: break-word; overflow-wrap: break-word;"><!--Endpoints-->
+    <ul style="padding-left:10px;">
+      <li>A <a href="#1-2-x-debug-endpoints">LAUNCH_NESTED_CONTAINER_SESSION, ATTACH_CONTAINER_INPUT, ATTACH_CONTAINER_OUTPUT</a></li>
+      <li>D <a href="#1-2-x-recovered-frameworks">v1 GetFrameworks recovered_frameworks</a></li>
+      <li>D <a href="#1-2-x-orphan-executors">v1 GetExecutors orphan_executors</a></li>
+      <li>D <a href="#1-2-x-orphan-tasks">v1 GetTasks orphan_tasks</a></li>
+    </ul>
   </td>
 </tr>
 <tr>
@@ -72,8 +209,6 @@ We categorize the changes as follows:
   <td style="word-wrap: break-word; overflow-wrap: break-word;"><!--Module API-->
     <ul style="padding-left:10px;">
       <li>R <a href="#1-1-x-container-logger-interface">Container Logger recovery method</a></li>
-    </ul>
-    <ul style="padding-left:10px;">
       <li>C <a href="#1-1-x-allocator-updateallocation">Allocator updateAllocation method</a></li>
     </ul>
   </td>
@@ -110,7 +245,7 @@ We categorize the changes as follows:
   <td style="word-wrap: break-word; overflow-wrap: break-word;"><!--Framework API-->
     <ul style="padding-left:10px;">
       <li>DC <a href="#1-0-x-executorinfo">ExecutorInfo.source</a></li>
-      <li>N <a href="#1-0-x-v1-commandinfo">CommandInfo.URI output_file</a></li>
+      <li>A <a href="#1-0-x-v1-commandinfo">CommandInfo.URI output_file</a></li>
       <li>C <a href="#1-0-x-scheduler-proto">scheduler.proto optional fields</a></li>
       <li>C <a href="#1-0-x-executor-proto">executor.proto optional fields</a></li>
     </ul>
@@ -222,12 +357,188 @@ We categorize the changes as follows:
 </tr>
 </table>
 
+## Upgrading from 1.4.x to 1.5.x ##
+
+<a name="1-5-x-task-starting"></a>
+
+* The built-in executors will now send a `TASK_STARTING` status update for
+  every task they've successfully received and are about to start.
+  The possibility of any executor sending this update has been documented since
+  the beginning of Mesos, but prior to this version the built-in executors did
+  not actually send it. This means that all schedulers using one of the built-in
+  executors must be upgraded to expect `TASK_STARTING` updates before upgrading
+  Mesos itself.
+
+<a name="1-5-x-task-resource-limitation"></a>
+
+* A new field, `limitation`, was added to the `TaskStatus` message. This
+  field is a `TaskResourceLimitation` message that describes the resources
+  that caused a task to fail with a resource limitation reason.
+
+<a name="1-5-x-network-ports-isolator"></a>
+
+* A new [`network/ports`](isolators/network-ports.md) isolator has been added. The isolator supports the following new agent flags:
+  * `--container_ports_watch_interval` specifies the interval at which the isolator reconciles port assignments.
+  * `--check_agent_port_range_only` excludes ports outside the agent's range from port reconcilation.
+
+<a name="1-5-x-executor-secret-key"></a>
+
+* Agent flag `--executor_secret_key` has been deprecated. Operators should use `--jwt_secret_key` instead.
+
+<a name="1-5-x-relative-disk-source-root-path"></a>
+
+* The fields `Resource.disk.source.path.root` and `Resource.disk.source.mount.root` can now be set to relative paths to an agent's work directory. The containerizers will interpret the paths based on the `--work_dir` flag on an agent.
+
+<a name="1-5-x-get-containers"></a>
+
+* The agent operator API call `GET_CONTAINERS` has been updated to support listing nested or standalone containers. One can specify the following fields in the request:
+  * `show_nested`: Whether to show nested containers.
+  * `show_standalone`: Whether to show standalone containers.
+
+## Upgrading from 1.3.x to 1.4.x ##
+
+<a name="1-4-x-ambient-capabilities"></a>
+
+* If the `mesos-agent` kernel supports ambient capabilities (Linux 4.3 or later), the capabilities specified in the `LinuxInfo.effective_capabilities` message will be made ambient in the container task.
+
+<a name="1-4-x-bounding-capabilities"></a>
+
+* Explicitly setting the bounding capabilities of a task independently of the effective capabilities is now supported. Frameworks can specifiy the task bounding capabilities by using the `LinuxInfo.bounding_capabilities` message. Operators can specify the default bounding capabilities using the agent `--bounding_capabilities` flag. This flag also specifies the maximum bounding set that a framework is allowed to specify.
+
+<a name="1-4-x-agent-recovery"></a>
+
+* Agent is now allowed to recover its agent ID post a host reboot. This prevents the unnecessary discarding of agent ID by prior Mesos versions. Notes about backwards compatibility:
+  * In case the agent's recovery runs into agent info mismatch which may happen due to resource change associated with reboot, it'll fall back to recovering as a new agent (existing behavior).
+  * In other cases such as checkpointed resources (e.g. persistent volumes) being incompatible with the agent's resources the recovery will still fail (existing behavior).
+
+<a name="1-4-x-linuxinfo-capabilities"></a>
+
+* The `LinuxInfo.capabilities` field has been deprecated in favor of `LinuxInfo.effective_capabilities`.
+
+<a name="1-4-x-agent-capabilities-flags"></a>
+
+* Changes to capability-related agent flags:
+  * The agent `--effective_capabilities` flag has been added to specify the default effective capability set for tasks.
+  * The agent `--bounding_capabilities` flag has been added to specify the default bounding capability set for tasks.
+  * The agent `--allowed-capabilities` flag has been deprecated in favor of `--effective_capabilities`.
+
+<a name="1-4-x-allocator-update-slave"></a>
+
+* The semantics of the optional resource argument passed in `Allocator::updateSlave` was change. While previously the passed value denoted a new amount of oversubscribed (revocable) resources on the agent, it now denotes the new amount of total resources on the agent. This requires custom allocator implementations to update their interpretation of the passed value.
+
+<a name="1-4-x-xfs-no-enforce"></a>
+
+* The XFS Disk Isolator now supports the `--no-enforce_container_disk_quota` option to efficiently measure disk resource usage without enforcing any usage limits.
+
+<a name="1-4-x-mesos-library"></a>
+
+* The `Resources` class in the internal Mesos C++ library changed its behavior to only support post-`RESERVATION_REFINEMENT` format. If a framework is using this internal utility, it is likely to break if the `RESERVATION_REFINEMENT` capability is not enabled.
+
+## Upgrading from 1.2.x to 1.3.x ##
+
+<a name="1-3-x-disallow-old-agents"></a>
+
+* The master will no longer allow 0.x agents to register. Interoperability between 1.1+ masters and 0.x agents has never been supported; however, it was not explicitly disallowed, either. Starting with this release of Mesos, registration attempts by 0.x agents will be ignored.
+
+<a name="1-3-x-setquota-removequota-acl"></a>
+
+* Support for deprecated ACLs `set_quotas` and `remove_quotas` has been removed from the local authorizer. Before upgrading the Mesos binaries, consolidate the ACLs used under `set_quotas` and `remove_quotes` under their replacement ACL `update_quotas`. After consolidation of the ACLs, the binaries could be safely replaced.
+
+<a name="1-3-x-shutdown-framework-acl"></a>
+
+* Support for deprecated ACL `shutdown_frameworks` has been removed from the local authorizer. Before upgrading the Mesos binaries, replace all instances of the ACL `shutdown_frameworks` with the newer ACL `teardown_frameworks`. After updating the ACLs, the binaries can be safely replaced.
+
+<a name="1-3-x-framework-info-role"></a>
+
+* Support for multi-role frameworks deprecates the `FrameworkInfo.role` field in favor of `FrameworkInfo.roles` and the `MULTI_ROLE` capability. Frameworks using the new field can continue to use a single role.
+
+<a name="1-3-x-endpoints-roles"></a>
+
+* Support for multi-role frameworks means that the framework `role` field in the master and agent endpoints is deprecated in favor of `roles`. Any tooling parsing endpoint information and relying on the role field needs to be updated before multi-role frameworks can be safely run in the cluster.
+
+<a name="1-3-x-allocator-interface-change"></a>
+
+* Implementors of allocator modules have to provide new implementation functionality to satisfy the `MULTI_ROLE` framework capability. Also, the interface has changed.
+
+<a name="1-3-x-executor-authentication"></a>
+
+* New Agent flags `authenticate_http_executors` and `executor_secret_key`: Used to enable required HTTP executor authentication and set the key file used for generation and authentication of HTTP executor tokens. Note that enabling these flags after upgrade is disruptive to HTTP executors that were launched before the upgrade. For more information on the recommended upgrade procedure when enabling these flags, see the [authentication documentation](authentication.md).
+
+In order to upgrade a running cluster:
+
+1. Rebuild and install any modules so that upgraded masters/agents/schedulers can use them.
+2. Install the new master binaries and restart the masters.
+3. Install the new agent binaries and restart the agents.
+4. Upgrade the schedulers by linking the latest native library / jar / egg (if necessary).
+5. Restart the schedulers.
+6. Upgrade the executors by linking the latest native library / jar / egg (if necessary).
 
 ## Upgrading from 1.1.x to 1.2.x ##
+
+<a name="1-2-1-disallow-old-agents"></a>
+
+* In Mesos 1.2.1, the master will no longer allow 0.x agents to register. Interoperability between 1.1+ masters and 0.x agents has never been supported; however, it was not explicitly disallowed, either. Starting with Mesos 1.2.1, registration attempts by 0.x agents will be ignored. **NOTE:** This applies only when upgrading to Mesos 1.2.1. Mesos 1.2.0 does not implement this behavior.
+
+<a name="1-2-x-heartbeat-flag"></a>
+
+* New Agent flag http_heartbeat_interval: This flag sets a heartbeat interval for messages to be sent over persistent connections made against the agent HTTP API. Currently, this only applies to the LAUNCH_NESTED_CONTAINER_SESSION and ATTACH_CONTAINER_OUTPUT calls. (default: 30secs)
+
+<a name="1-2-x-backend-flag"></a>
+
+* New Agent flag image_provisioner_backend: Strategy for provisioning container rootfs from images, e.g., aufs, bind, copy, overlay.
+
+<a name="1-2-x-unreachable-flag"></a>
+
+* New Master flag max_unreachable_tasks_per_framework: Maximum number of unreachable tasks per framework to store in memory. (default: 1000)
+
+<a name="1-2-x-revive-suppress"></a>
+
+* New Revive and Suppress v1 scheduler Calls: Revive or Suppress offers for a specified role. If role is unset, the call will revive/suppress offers for all of the roles the framework is subscribed to. (Especially for multi-role frameworks.)
 
 <a name="1-2-x-container-logger-interface"></a>
 
 * Mesos 1.2 modifies the `ContainerLogger`'s `prepare()` method.  The method now takes an additional argument for the `user` the logger should run a subprocess as.  Please see [MESOS-5856](https://issues.apache.org/jira/browse/MESOS-5856) for more information.
+
+<a name="1-2-x-allocator-module-changes"></a>
+
+* Allocator module changes to support inactive frameworks, multi-role frameworks, and suppress/revive. See `allocator.hpp` for interface changes.
+
+<a name="1-2-x-new-authz-actions"></a>
+
+* New Authorizer module actions: LAUNCH_NESTED_CONTAINER, KILL_NESTED_CONTAINER, WAIT_NESTED_CONTAINER, LAUNCH_NESTED_CONTAINER_SESSION, ATTACH_CONTAINER_INPUT, ATTACH_CONTAINER_OUTPUT, VIEW_CONTAINER, and SET_LOG_LEVEL. See `authorizer.proto` for module interface changes, and `acls.proto` for corresponding LocalAuthorizer ACL changes.
+
+<a name="1-2-x-renamed-authz-actions"></a>
+
+* Renamed Authorizer module actions (and deprecated old aliases): REGISTER_FRAMEWORK, TEARDOWN_FRAMEWORK, RESERVE_RESOURCES, UNRESERVE_RESOURCES, CREATE_VOLUME, DESTROY_VOLUME, UPDATE_WEIGHT, GET_QUOTA. See `authorizer.proto` for interface changes.
+
+<a name="1-2-x-removed-hooks"></a>
+
+* Removed slavePreLaunchDockerEnvironmentDecorator and slavePreLaunchDockerHook in favor of slavePreLaunchDockerTaskExecutorDecorator.
+
+<a name="1-2-x-debug-endpoints"></a>
+
+* New Agent v1 operator API calls: LAUNCH_NESTED_CONTAINER_SESSION, ATTACH_CONTAINER_INPUT, ATTACH_CONTAINER_OUTPUT for debugging into running containers (Mesos containerizer only).
+
+<a name="1-2-x-recovered-frameworks"></a>
+
+* Deprecated `recovered_frameworks` in v1 GetFrameworks call. Now it will be empty.
+
+<a name="1-2-x-orphan-executors"></a>
+
+* Deprecated `orphan_executors` in v1 GetExecutors call. Now it will be empty.
+
+<a name="1-2-x-orphan-tasks"></a>
+
+* Deprecated `orphan_tasks` in v1 GetTasks call. Now it will be empty.
+
+In order to upgrade a running cluster:
+
+1. Rebuild and install any modules so that upgraded masters/agents/schedulers can use them.
+2. Install the new master binaries and restart the masters.
+3. Install the new agent binaries and restart the agents.
+4. Upgrade the schedulers by linking the latest native library / jar / egg (if necessary).
+5. Restart the schedulers.
+6. Upgrade the executors by linking the latest native library / jar / egg (if necessary).
 
 ## Upgrading from 1.0.x to 1.1.x ##
 
@@ -467,8 +778,8 @@ In order to upgrade a running cluster:
 
   For agent endpoints:
 
-  * /state.json becomes /stateπ
-  * /monitor/statistics.json becomes /monitor/statisticsπ
+  * /state.json becomes /state
+  * /monitor/statistics.json becomes /monitor/statistics
 
   For both master and agent:
 

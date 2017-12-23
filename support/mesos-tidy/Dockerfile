@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-FROM ubuntu:trusty
+FROM ubuntu:xenial
 MAINTAINER The Apache Mesos Developers <dev@mesos.apache.org>
 
 WORKDIR /tmp/build
@@ -24,61 +24,53 @@ RUN apt-get update
 RUN apt-get install -qy --no-install-recommends \
   build-essential \
   ca-certificates \
-  cmake \
+  curl \
   git \
   python-dev && \
   apt-get clean
 
+# Mesos requires at least cmake-3.7.0 on Linux and cmake-3.8.0 on Windows.
+#
+# TODO(abudnik): Skip this step when a newer version of CMake package is
+# available in OS repository.
+RUN curl -sSL https://cmake.org/files/v3.8/cmake-3.8.2-Linux-x86_64.sh \
+    -o /tmp/install-cmake.sh && \
+    sh /tmp/install-cmake.sh --skip-license --prefix=/usr/local
+
 RUN \
-  git clone --depth 1 -b release_38 http://llvm.org/git/llvm /tmp/llvm && \
-  git clone --depth 1 -b release_38 http://llvm.org/git/clang /tmp/llvm/tools/clang && \
-  git clone --depth 1 -b mesos_38 http://github.com/mesos/clang-tools-extra.git /tmp/llvm/tools/clang/tools/extra && \
+  git clone --depth 1 -b release_50 http://llvm.org/git/llvm /tmp/llvm && \
+  git clone --depth 1 -b mesos_50 http://github.com/mesos/clang.git /tmp/llvm/tools/clang && \
+  git clone --depth 1 -b mesos_50 http://github.com/mesos/clang-tools-extra.git /tmp/llvm/tools/clang/tools/extra && \
   \
-  cmake /tmp/llvm -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/opt/ && \
-  make -j $(nproc) install && \
+  cmake /tmp/llvm -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/opt && \
+  cmake --build tools/clang/lib/Headers --target install -- -j $(nproc) && \
+  cmake --build tools/clang/tools/extra/clang-tidy --target install -- -j $(nproc) && \
   \
   cd / && \
   rm -rf /tmp/llvm && \
   rm -rf /tmp/build
 
-# Install Bear.
-RUN apt-get install -qy \
-  curl && \
-  apt-get clean
-
-RUN \
-  curl -k -O https://codeload.github.com/rizsotto/Bear/tar.gz/2.2.0 && \
-  tar xzf 2.2.0 && \
-  rm 2.2.0 && \
-  cd Bear-2.2.0/ && \
-  cmake . -DCMAKE_INSTALL_PREFIX=/opt && \
-  make -j $(nproc) install && \
-  \
-  cd / && \
-  rm -rf Bear-2.2.0
-
 ENV PATH /opt/bin:$PATH
 
 # Install Mesos dependencies
+# TODO(mpark): Remove `libssl-dev` from this list once `MESOS-6942` is resolved.
 RUN apt-get install -qy \
   autoconf \
-  jq \
   libapr1-dev \
   libcurl4-nss-dev \
-  libev-dev \
-  libevent-dev \
   libsasl2-dev \
   libsasl2-modules \
+  libssl-dev \
   libsvn-dev \
   libtool \
-  maven \
-  openjdk-7-jdk \
   zlib1g-dev && \
   apt-get clean
 
-# Install parallel for clang-tidy invocation.
+# Install `jq` and `parallel` for `clang-tidy` invocation.
 RUN apt-get install -qy \
-  parallel
+  jq \
+  parallel && \
+  apt-get clean
 
 # Wire up the script which performs the actual work.
 WORKDIR /BUILD

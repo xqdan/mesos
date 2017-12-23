@@ -56,6 +56,9 @@ Metrics::Metrics(const Master& master)
     slaves_inactive(
         "master/slaves_inactive",
         defer(master, &Master::_slaves_inactive)),
+    slaves_unreachable(
+        "master/slaves_unreachable",
+        defer(master, &Master::_slaves_unreachable)),
     frameworks_connected(
         "master/frameworks_connected",
         defer(master, &Master::_frameworks_connected)),
@@ -80,6 +83,9 @@ Metrics::Metrics(const Master& master)
     tasks_running(
         "master/tasks_running",
         defer(master, &Master::_tasks_running)),
+    tasks_unreachable(
+        "master/tasks_unreachable",
+        defer(master, &Master::_tasks_unreachable)),
     tasks_killing(
         "master/tasks_killing",
         defer(master, &Master::_tasks_killing)),
@@ -95,8 +101,6 @@ Metrics::Metrics(const Master& master)
         "master/tasks_error"),
     tasks_dropped(
         "master/tasks_dropped"),
-    tasks_unreachable(
-        "master/tasks_unreachable"),
     tasks_gone(
         "master/tasks_gone"),
     tasks_gone_by_operator(
@@ -205,6 +209,7 @@ Metrics::Metrics(const Master& master)
   process::metrics::add(slaves_disconnected);
   process::metrics::add(slaves_active);
   process::metrics::add(slaves_inactive);
+  process::metrics::add(slaves_unreachable);
 
   process::metrics::add(frameworks_connected);
   process::metrics::add(frameworks_disconnected);
@@ -350,6 +355,7 @@ Metrics::~Metrics()
   process::metrics::remove(slaves_disconnected);
   process::metrics::remove(slaves_active);
   process::metrics::remove(slaves_inactive);
+  process::metrics::remove(slaves_unreachable);
 
   process::metrics::remove(frameworks_connected);
   process::metrics::remove(frameworks_disconnected);

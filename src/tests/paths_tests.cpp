@@ -47,16 +47,16 @@ public:
     frameworkId.set_value("framework1");
     executorId.set_value("executor1");
     taskId.set_value("task1");
-    containerId.set_value(UUID::random().toString());
+    containerId.set_value(id::UUID::random().toString());
     role = "role1";
     persistenceId = "persistenceId1";
 
     Try<string> path = os::mkdtemp();
-    CHECK_SOME(path) << "Failed to mkdtemp";
+    ASSERT_SOME(path) << "Failed to mkdtemp";
     rootDir = path.get();
 
     path = os::mkdtemp();
-    CHECK_SOME(path) << "Failed to mkdtemp";
+    ASSERT_SOME(path) << "Failed to mkdtemp";
     diskSourceDir = path.get();
 
     imageType = Image::APPC;

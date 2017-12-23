@@ -14,6 +14,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <map>
+#include <string>
+
 #include <gtest/gtest.h>
 
 #include <stout/gtest.hpp>
@@ -38,6 +41,7 @@ using mesos::internal::slave::MesosContainerizer;
 
 using mesos::slave::ContainerTermination;
 
+using std::map;
 using std::string;
 
 namespace mesos {
@@ -57,7 +61,6 @@ protected:
   }
 
   bool nesting;
-  Fetcher fetcher;
 };
 
 
@@ -81,6 +84,8 @@ TEST_P(VolumeImageIsolatorTest, ROOT_ImageInVolumeWithoutRootFilesystem)
   flags.docker_store_dir = path::join(sandbox.get(), "store");
   flags.image_providers = "docker";
 
+  Fetcher fetcher(flags);
+
   Try<MesosContainerizer*> create =
     MesosContainerizer::create(flags, true, &fetcher);
 
@@ -89,7 +94,7 @@ TEST_P(VolumeImageIsolatorTest, ROOT_ImageInVolumeWithoutRootFilesystem)
   Owned<Containerizer> containerizer(create.get());
 
   ContainerID containerId;
-  containerId.set_value(UUID::random().toString());
+  containerId.set_value(id::UUID::random().toString());
 
   ContainerInfo container = createContainerInfo(
       None(),
@@ -108,33 +113,28 @@ TEST_P(VolumeImageIsolatorTest, ROOT_ImageInVolumeWithoutRootFilesystem)
   string directory = path::join(flags.work_dir, "sandbox");
   ASSERT_SOME(os::mkdir(directory));
 
-  Future<bool> launch = containerizer->launch(
+  Future<Containerizer::LaunchResult> launch = containerizer->launch(
       containerId,
-      None(),
-      executor,
-      directory,
-      None(),
-      SlaveID(),
+      createContainerConfig(None(), executor, directory),
       map<string, string>(),
-      false);
+      None());
 
-  AWAIT_ASSERT_TRUE(launch);
+  AWAIT_ASSERT_EQ(Containerizer::LaunchResult::SUCCESS, launch);
 
   Future<Option<ContainerTermination>> wait = containerizer->wait(containerId);
 
   if (nesting) {
     ContainerID nestedContainerId;
     nestedContainerId.mutable_parent()->CopyFrom(containerId);
-    nestedContainerId.set_value(UUID::random().toString());
+    nestedContainerId.set_value(id::UUID::random().toString());
 
     launch = containerizer->launch(
         nestedContainerId,
-        command,
-        container,
-        None(),
-        SlaveID());
+        createContainerConfig(command, container),
+        map<string, string>(),
+        None());
 
-    AWAIT_ASSERT_TRUE(launch);
+    AWAIT_ASSERT_EQ(Containerizer::LaunchResult::SUCCESS, launch);
 
     wait = containerizer->wait(nestedContainerId);
   }
@@ -172,6 +172,8 @@ TEST_P(VolumeImageIsolatorTest, ROOT_ImageInVolumeWithRootFilesystem)
   flags.docker_store_dir = path::join(sandbox.get(), "store");
   flags.image_providers = "docker";
 
+  Fetcher fetcher(flags);
+
   Try<MesosContainerizer*> create =
     MesosContainerizer::create(flags, true, &fetcher);
 
@@ -180,7 +182,7 @@ TEST_P(VolumeImageIsolatorTest, ROOT_ImageInVolumeWithRootFilesystem)
   Owned<Containerizer> containerizer(create.get());
 
   ContainerID containerId;
-  containerId.set_value(UUID::random().toString());
+  containerId.set_value(id::UUID::random().toString());
 
   ContainerInfo container = createContainerInfo(
       "test_image_rootfs",
@@ -201,33 +203,28 @@ TEST_P(VolumeImageIsolatorTest, ROOT_ImageInVolumeWithRootFilesystem)
   string directory = path::join(flags.work_dir, "sandbox");
   ASSERT_SOME(os::mkdir(directory));
 
-  Future<bool> launch = containerizer->launch(
+  Future<Containerizer::LaunchResult> launch = containerizer->launch(
       containerId,
-      None(),
-      executor,
-      directory,
-      None(),
-      SlaveID(),
+      createContainerConfig(None(), executor, directory),
       map<string, string>(),
-      false);
+      None());
 
-  AWAIT_ASSERT_TRUE(launch);
+  AWAIT_ASSERT_EQ(Containerizer::LaunchResult::SUCCESS, launch);
 
   Future<Option<ContainerTermination>> wait = containerizer->wait(containerId);
 
   if (nesting) {
     ContainerID nestedContainerId;
     nestedContainerId.mutable_parent()->CopyFrom(containerId);
-    nestedContainerId.set_value(UUID::random().toString());
+    nestedContainerId.set_value(id::UUID::random().toString());
 
     launch = containerizer->launch(
         nestedContainerId,
-        command,
-        container,
-        None(),
-        SlaveID());
+        createContainerConfig(command, container),
+        map<string, string>(),
+        None());
 
-    AWAIT_ASSERT_TRUE(launch);
+    AWAIT_ASSERT_EQ(Containerizer::LaunchResult::SUCCESS, launch);
 
     wait = containerizer->wait(nestedContainerId);
   }

@@ -17,7 +17,6 @@
 
 #include <process/gtest.hpp>
 #include <process/owned.hpp>
-#include <process/socket.hpp>
 
 #include <stout/gtest.hpp>
 
@@ -31,10 +30,6 @@ using process::Owned;
 using process::ResponseDecoder;
 using process::StreamingRequestDecoder;
 using process::StreamingResponseDecoder;
-
-using process::http::Request;
-
-using process::network::Socket;
 
 using std::deque;
 using std::string;
@@ -78,7 +73,7 @@ TYPED_TEST(RequestDecoderTest, Request)
   EXPECT_SOME_EQ("value2", request->url.query.get("key2"));
 
   Future<string> body = [&request]() -> Future<string> {
-    if (request->type == Request::BODY) {
+    if (request->type == http::Request::BODY) {
       return request->body;
     }
 
@@ -139,6 +134,22 @@ TYPED_TEST(RequestDecoderTest, HeaderCaseInsensitive)
 }
 
 
+TYPED_TEST(RequestDecoderTest, InvalidQueryArgs)
+{
+  TypeParam decoder;
+
+  const string data =
+    "GET /path/file.json?%x=%y&key2=value2#fragment HTTP/1.1\r\n"
+    "Host: localhost\r\n"
+    "Connection: close\r\n"
+    "Accept-Encoding: compress, gzip\r\n"
+    "\r\n";
+
+  deque<http::Request*> requests = decoder.decode(data.data(), data.length());
+  EXPECT_TRUE(decoder.failed());
+}
+
+
 TEST(DecoderTest, Response)
 {
   ResponseDecoder decoder;
@@ -162,6 +173,35 @@ TEST(DecoderTest, Response)
   EXPECT_EQ("hi", response->body);
 
   EXPECT_EQ(3u, response->headers.size());
+}
+
+
+TEST(DecoderTest, ResponseWithUnspecifiedLength)
+{
+  ResponseDecoder decoder;
+
+  const string data =
+    "HTTP/1.1 200 OK\r\n"
+    "Date: Fri, 31 Dec 1999 23:59:59 GMT\r\n"
+    "Content-Type: text/plain\r\n"
+    "\r\n"
+    "hi";
+
+  deque<http::Response*> responses = decoder.decode(data.data(), data.length());
+  ASSERT_FALSE(decoder.failed());
+  ASSERT_TRUE(responses.empty());
+
+  responses = decoder.decode("", 0);
+  ASSERT_FALSE(decoder.failed());
+  ASSERT_EQ(1u, responses.size());
+
+  Owned<http::Response> response(responses[0]);
+
+  EXPECT_EQ("200 OK", response->status);
+  EXPECT_EQ(http::Response::BODY, response->type);
+  EXPECT_EQ("hi", response->body);
+
+  EXPECT_EQ(2u, response->headers.size());
 }
 
 
@@ -267,4 +307,21 @@ TEST(DecoderTest, StreamingResponseFailure)
 
   EXPECT_TRUE(read.isFailed());
   EXPECT_EQ("failed to decode body", read.failure());
+}
+
+
+TEST(DecoderTest, StreamingResponseInvalidHeader)
+{
+  StreamingResponseDecoder decoder;
+
+  const string headers =
+    "HTTP/1.1 999 OK\r\n"
+    "Date: Fri, 31 Dec 1999 23:59:59 GMT\r\n"
+    "Content-Type: text/plain\r\n"
+    "\r\n";
+
+  deque<http::Response*> responses =
+    decoder.decode(headers.data(), headers.length());
+
+  EXPECT_TRUE(decoder.failed());
 }

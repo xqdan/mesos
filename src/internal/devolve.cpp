@@ -20,6 +20,8 @@
 
 using std::string;
 
+using google::protobuf::RepeatedPtrField;
+
 namespace mesos {
 namespace internal {
 
@@ -51,6 +53,12 @@ static T devolve(const google::protobuf::Message& message)
 CommandInfo devolve(const v1::CommandInfo& command)
 {
   return devolve<CommandInfo>(command);
+}
+
+
+ContainerID devolve(const v1::ContainerID& containerId)
+{
+  return devolve<ContainerID>(containerId);
 }
 
 
@@ -93,6 +101,34 @@ InverseOffer devolve(const v1::InverseOffer& inverseOffer)
 Offer devolve(const v1::Offer& offer)
 {
   return devolve<Offer>(offer);
+}
+
+
+OperationStatus devolve(const v1::OperationStatus& status)
+{
+  return devolve<OperationStatus>(status);
+}
+
+
+Resource devolve(const v1::Resource& resource)
+{
+  return devolve<Resource>(resource);
+}
+
+
+ResourceProviderID devolve(const v1::ResourceProviderID& resourceProviderId)
+{
+  // NOTE: We do not use the common 'devolve' call for performance.
+  ResourceProviderID id;
+  id.set_value(resourceProviderId.value());
+  return id;
+}
+
+
+Resources devolve(const v1::Resources& resources)
+{
+  return devolve<Resource>(
+      static_cast<const RepeatedPtrField<v1::Resource>&>(resources));
 }
 
 
@@ -145,9 +181,32 @@ executor::Event devolve(const v1::executor::Event& event)
 }
 
 
+mesos::resource_provider::Call devolve(const v1::resource_provider::Call& call)
+{
+  return devolve<mesos::resource_provider::Call>(call);
+}
+
+
+mesos::resource_provider::Event devolve(
+    const v1::resource_provider::Event& event)
+{
+  return devolve<mesos::resource_provider::Event>(event);
+}
+
+
 scheduler::Call devolve(const v1::scheduler::Call& call)
 {
-  return devolve<scheduler::Call>(call);
+  scheduler::Call _call = devolve<scheduler::Call>(call);
+
+  // Certain conversions require special handling.
+  if (_call.type() == scheduler::Call::SUBSCRIBE) {
+    // v1 Subscribe.suppressed_roles cannot be automatically converted
+    // because its tag is used by another field in the internal Subscribe.
+    *(_call.mutable_subscribe()->mutable_suppressed_roles()) =
+      call.subscribe().suppressed_roles();
+  }
+
+  return _call;
 }
 
 

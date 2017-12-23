@@ -17,69 +17,63 @@
 # PROCESS TESTS.
 ################
 set(PROCESS_TESTS_SRC
-  ${PROCESS_TESTS_SRC}
   main.cpp
+  after_tests.cpp
   collect_tests.cpp
+  count_down_latch_tests.cpp
   decoder_tests.cpp
   encoder_tests.cpp
   future_tests.cpp
   http_tests.cpp
   limiter_tests.cpp
+  loop_tests.cpp
   metrics_tests.cpp
   mutex_tests.cpp
   owned_tests.cpp
   process_tests.cpp
   queue_tests.cpp
+  rwlock_tests.cpp
   sequence_tests.cpp
   shared_tests.cpp
+  socket_tests.cpp
+  state_machine_tests.cpp
   statistics_tests.cpp
   subprocess_tests.cpp
   system_tests.cpp
-  timeseries_tests.cpp
   time_tests.cpp
-  )
+  timeseries_tests.cpp)
 
 if (NOT WIN32)
-  set(PROCESS_TESTS_SRC
-    ${PROCESS_TESTS_SRC}
+  list(APPEND PROCESS_TESTS_SRC
     io_tests.cpp
-    reap_tests.cpp
-    )
-endif (NOT WIN32)
+    reap_tests.cpp)
+endif ()
 
+if (ENABLE_SSL)
+  list(APPEND PROCESS_TESTS_SRC
+    jwt_tests.cpp
+    ssl_tests.cpp)
+endif ()
 
-# ADDITIONAL CPP FLAGS FOR PROCESS TEST BINARY (e.g., -DBUILD_DIR=...).
-#######################################################################
-add_definitions("-DBUILD_DIR=\"${CMAKE_CURRENT_BINARY_DIR}\"")
+add_library(process-interface INTERFACE)
+target_link_libraries(process-interface INTERFACE process googletest)
+target_include_directories(process-interface INTERFACE ..)
 
-# INCLUDE DIRECTIVES FOR PROCESS TEST BINARY (generates, e.g., -I/path/to/thing
-# on Linux).
-###############################################################################
-include_directories(${PROCESS_TEST_INCLUDE_DIRS})
+add_executable(libprocess-tests EXCLUDE_FROM_ALL ${PROCESS_TESTS_SRC})
+target_link_libraries(libprocess-tests PRIVATE process-interface)
 
-# LINKING LIBRARIES BY DIRECTORY (might generate, e.g., -L/path/to/thing on
-# Linux).
-###########################################################################
-link_directories(${PROCESS_TEST_LIB_DIRS})
+target_compile_definitions(
+  libprocess-tests PRIVATE
+  BUILD_DIR="${CMAKE_CURRENT_BINARY_DIR}")
 
-# THE PROCESS TEST EXECUTABLE (generates, e.g., process_tests, etc., on Linux).
-###############################################################################
-add_executable(${PROCESS_TESTS_TARGET} ${PROCESS_TESTS_SRC})
+add_executable(test-linkee EXCLUDE_FROM_ALL test_linkee.cpp)
+target_link_libraries(test-linkee PRIVATE process-interface)
+add_dependencies(libprocess-tests test-linkee)
 
-# ADD LINKER FLAGS (generates, e.g., -lglog on Linux).
-######################################################
-target_link_libraries(${PROCESS_TESTS_TARGET} ${PROCESS_TEST_LIBS})
+if (ENABLE_SSL)
+  add_executable(ssl-client EXCLUDE_FROM_ALL ssl_client.cpp)
+  target_link_libraries(ssl-client PRIVATE process-interface)
+  add_dependencies(libprocess-tests ssl-client)
+endif ()
 
-# ADD BINARY DEPENDENCIES (tells CMake what to compile/build first).
-####################################################################
-add_dependencies(${PROCESS_TESTS_TARGET} ${PROCESS_TEST_DEPENDENCIES})
-
-# ADDITIONAL EXECUTABLE(s).
-###########################
-add_executable(test-linkee test_linkee.cpp)
-target_link_libraries(test-linkee ${PROCESS_TEST_LIBS})
-add_dependencies(${PROCESS_TESTS_TARGET} test-linkee)
-
-# ADD TEST TARGET (runs when you do, e.g., `make check`).
-#########################################################
-add_test(NAME ProcessTests COMMAND ./${PROCESS_TESTS_TARGET})
+add_test(NAME ProcessTests COMMAND libprocess-tests)

@@ -14,9 +14,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <sys/mount.h>
+
 #include <set>
 
 #include <process/id.hpp>
+
+#include <stout/os.hpp>
 
 #include <stout/os/strerror.hpp>
 
@@ -33,6 +37,7 @@ using std::string;
 using mesos::slave::ContainerConfig;
 using mesos::slave::ContainerLaunchInfo;
 using mesos::slave::ContainerLimitation;
+using mesos::slave::ContainerMountInfo;
 using mesos::slave::ContainerState;
 using mesos::slave::Isolator;
 
@@ -66,6 +71,7 @@ Try<Isolator*> SharedFilesystemIsolatorProcess::create(const Flags& flags)
 
   return new MesosIsolator(process);
 }
+
 
 // We only need to implement the `prepare()` function in this
 // isolator. There is nothing to recover because we do not keep any
@@ -101,7 +107,7 @@ Future<Option<ContainerLaunchInfo>> SharedFilesystemIsolatorProcess::prepare(
   containerPaths.insert(containerConfig.directory());
 
   ContainerLaunchInfo launchInfo;
-  launchInfo.set_clone_namespaces(CLONE_NEWNS);
+  launchInfo.add_clone_namespaces(CLONE_NEWNS);
 
   foreach (const Volume& volume, executorInfo.container().volumes()) {
     // Because the filesystem is shared we require the container path
@@ -206,8 +212,10 @@ Future<Option<ContainerLaunchInfo>> SharedFilesystemIsolatorProcess::prepare(
       }
     }
 
-    launchInfo.add_pre_exec_commands()->set_value(
-        "mount -n --bind " + hostPath + " " + volume.container_path());
+    ContainerMountInfo* mount = launchInfo.add_mounts();
+    mount->set_source(hostPath);
+    mount->set_target(volume.container_path());
+    mount->set_flags(MS_BIND | MS_REC);
   }
 
   return launchInfo;

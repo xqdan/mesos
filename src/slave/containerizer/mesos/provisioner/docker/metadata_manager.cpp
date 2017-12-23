@@ -36,13 +36,14 @@
 #include "slave/containerizer/mesos/provisioner/docker/message.hpp"
 #include "slave/containerizer/mesos/provisioner/docker/metadata_manager.hpp"
 
-using namespace process;
-
 namespace spec = docker::spec;
 
-using std::list;
 using std::string;
 using std::vector;
+
+using process::Failure;
+using process::Future;
+using process::Owned;
 
 namespace mesos {
 namespace internal {
@@ -66,7 +67,8 @@ public:
       const spec::ImageReference& reference,
       bool cached);
 
-  // TODO(chenlily): Implement removal of unreferenced images.
+  Future<hashset<string>> prune(
+      const vector<spec::ImageReference>& excludedImages);
 
 private:
   // Write out metadata manager state to persistent store.
@@ -133,6 +135,16 @@ Future<Option<Image>> MetadataManager::get(
 }
 
 
+Future<hashset<string>> MetadataManager::prune(
+    const vector<spec::ImageReference>& excludedImages)
+{
+  return dispatch(
+      process.get(),
+      &MetadataManagerProcess::prune,
+      excludedImages);
+}
+
+
 Future<Image> MetadataManagerProcess::put(
     const spec::ImageReference& reference,
     const vector<string>& layerIds)
@@ -179,6 +191,43 @@ Future<Option<Image>> MetadataManagerProcess::get(
 }
 
 
+Future<hashset<string>> MetadataManagerProcess::prune(
+    const vector<spec::ImageReference>& excludedImages)
+{
+  hashmap<string, Image> retainedImages;
+  hashset<string> retainedLayers;
+
+  foreach (const spec::ImageReference& reference, excludedImages) {
+    const string imageName = stringify(reference);
+    Option<Image> image = storedImages.get(imageName);
+
+    if (image.isNone()) {
+      // This is possible if docker store was cleaned
+      // in a recovery after the container using this image was
+      // launched.
+      VLOG(1) << "Excluded docker image '" << imageName
+              << "' is not cached in metadata manager.";
+      continue;
+    }
+
+    retainedImages[imageName] = image.get();
+
+    foreach (const string& layerId, image->layer_ids()) {
+      retainedLayers.insert(layerId);
+    }
+  }
+
+  storedImages = std::move(retainedImages);
+
+  Try<Nothing> status = persist();
+  if (status.isError()) {
+    return Failure("Failed to save state of Docker images: " + status.error());
+  }
+
+  return retainedLayers;
+}
+
+
 Try<Nothing> MetadataManagerProcess::persist()
 {
   Images images;
@@ -220,25 +269,7 @@ Future<Nothing> MetadataManagerProcess::recover()
   }
 
   foreach (const Image& image, images.get().images()) {
-    vector<string> missingLayerIds;
-
-    foreach (const string& layerId, image.layer_ids()) {
-      const string rootfsPath = paths::getImageLayerRootfsPath(
-          flags.docker_store_dir,
-          layerId,
-          flags.image_provisioner_backend);
-
-      if (!os::exists(rootfsPath)) {
-        missingLayerIds.push_back(layerId);
-      }
-    }
-
     const string imageReference = stringify(image.reference());
-
-    if (!missingLayerIds.empty()) {
-      LOG(WARNING) << "Skipped loading image '" << imageReference << "'";
-      continue;
-    }
 
     if (storedImages.contains(imageReference)) {
       LOG(WARNING) << "Found duplicate image in recovery for image reference '"

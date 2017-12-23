@@ -14,9 +14,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+syntax = "proto2";
+
 import "mesos/v1/mesos.proto";
 
 package mesos.v1.allocator;
+
+option java_package = "org.apache.mesos.v1.allocator";
+option java_outer_classname = "Protos";
 
 
 /**

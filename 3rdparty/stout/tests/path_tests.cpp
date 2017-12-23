@@ -19,6 +19,7 @@
 
 #include <stout/os/exists.hpp>
 #include <stout/os/getcwd.hpp>
+#include <stout/os/int_fd.hpp>
 #include <stout/os/open.hpp>
 #include <stout/os/rm.hpp>
 #include <stout/os/touch.hpp>
@@ -30,7 +31,7 @@ using std::vector;
 
 
 // Test many corner cases of Path::basename.
-TEST(PathTest, Basename)
+TEST_TEMP_DISABLED_ON_WINDOWS(PathTest, Basename)
 {
   // Empty path check.
   EXPECT_EQ(".", Path("").basename());
@@ -62,7 +63,7 @@ TEST(PathTest, Basename)
 
 
 // Test many corner cases of Path::dirname.
-TEST(PathTest, Dirname)
+TEST_TEMP_DISABLED_ON_WINDOWS(PathTest, Dirname)
 {
   // Empty path check.
   EXPECT_EQ(".", Path("").dirname());
@@ -99,7 +100,7 @@ TEST(PathTest, Dirname)
 }
 
 
-TEST(PathTest, Extension)
+TEST_TEMP_DISABLED_ON_WINDOWS(PathTest, Extension)
 {
   EXPECT_NONE(Path(".").extension());
   EXPECT_NONE(Path("..").extension());
@@ -122,7 +123,7 @@ TEST(PathTest, Extension)
 }
 
 
-TEST(PathTest, Join)
+TEST_TEMP_DISABLED_ON_WINDOWS(PathTest, Join)
 {
   EXPECT_EQ("a/b/c", path::join("a", "b", "c"));
   EXPECT_EQ("/a/b/c", path::join("/a", "b", "c"));
@@ -151,6 +152,33 @@ TEST(PathTest, Join)
 
 TEST(PathTest, Absolute)
 {
+#ifdef __WINDOWS__
+  // Check absolute paths.
+  EXPECT_TRUE(path::absolute("C:\\foo\\bar\\baz"));
+  EXPECT_TRUE(path::absolute("c:\\"));
+  EXPECT_TRUE(path::absolute("C:/"));
+  EXPECT_TRUE(path::absolute("c:/"));
+  EXPECT_TRUE(path::absolute("X:\\foo"));
+  EXPECT_TRUE(path::absolute("X:\\foo"));
+  EXPECT_TRUE(path::absolute("y:\\bar"));
+  EXPECT_TRUE(path::absolute("y:/bar"));
+  EXPECT_TRUE(path::absolute("\\\\?\\"));
+  EXPECT_TRUE(path::absolute("\\\\?\\C:\\Program Files"));
+  EXPECT_TRUE(path::absolute("\\\\?\\C:/Program Files"));
+  EXPECT_TRUE(path::absolute("\\\\?\\C:\\Path"));
+  EXPECT_TRUE(path::absolute("\\\\server\\share"));
+
+  // Check invalid paths.
+  EXPECT_FALSE(path::absolute("abc:/"));
+  EXPECT_FALSE(path::absolute("1:/"));
+  EXPECT_TRUE(path::absolute("\\\\?\\relative"));
+
+  // Check relative paths.
+  EXPECT_FALSE(path::absolute("relative"));
+  EXPECT_FALSE(path::absolute("\\file-without-disk"));
+  EXPECT_FALSE(path::absolute("/file-without-disk"));
+  EXPECT_FALSE(path::absolute("N:file-without-dir"));
+#else
   // Check absolute paths.
   EXPECT_TRUE(path::absolute("/"));
   EXPECT_TRUE(path::absolute("/foo"));
@@ -164,6 +192,7 @@ TEST(PathTest, Absolute)
   EXPECT_FALSE(path::absolute("../"));
   EXPECT_FALSE(path::absolute("./foo"));
   EXPECT_FALSE(path::absolute("../foo"));
+#endif // __WINDOWS__
 }
 
 
@@ -191,6 +220,26 @@ TEST(PathTest, Comparison)
 }
 
 
+TEST(PathTest, FromURI)
+{
+#ifdef __WINDOWS__
+  const std::string absolute_path = "C:\\somedir\\somefile";
+#else
+  const std::string absolute_path = "/somedir/somefile";
+#endif // __WINDOWS__
+
+  EXPECT_EQ("", path::from_uri(""));
+  EXPECT_EQ(absolute_path, path::from_uri(absolute_path));
+  EXPECT_EQ(absolute_path, path::from_uri("file://" + absolute_path));
+
+#ifdef __WINDOWS__
+  EXPECT_EQ(absolute_path, path::from_uri("file://C:/somedir/somefile"));
+  EXPECT_EQ(absolute_path, path::from_uri("C:/somedir/somefile"));
+  EXPECT_EQ(absolute_path, path::from_uri("C:\\somedir\\somefile"));
+#endif // __WINDOWS__
+}
+
+
 class PathFileTest : public TemporaryDirectoryTest {};
 
 
@@ -204,7 +253,7 @@ TEST_F(PathFileTest, ImplicitConversion)
   ASSERT_TRUE(os::exists(testfile));
 
   // Open and close the file.
-  Try<int> fd = os::open(
+  Try<int_fd> fd = os::open(
       testfile,
       O_RDONLY,
       S_IRUSR | S_IRGRP | S_IROTH);

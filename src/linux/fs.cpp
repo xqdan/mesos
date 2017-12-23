@@ -14,12 +14,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include "linux/fs.hpp"
+
 #include <errno.h>
 #include <stdio.h>
 #include <string.h>
 
 #include <linux/limits.h>
 #include <linux/unistd.h>
+
+// This header include must be enclosed in an `extern "C"` block to
+// workaround a bug in glibc <= 2.12 (see MESOS-7378).
+//
+// TODO(neilc): Remove this when we no longer support glibc <= 2.12.
+extern "C" {
+#include <sys/sysmacros.h>
+}
 
 #include <list>
 #include <set>
@@ -39,9 +49,11 @@
 #include <stout/os.hpp>
 
 #include <stout/os/read.hpp>
+#include <stout/os/realpath.hpp>
+#include <stout/os/shell.hpp>
 #include <stout/os/stat.hpp>
 
-#include "linux/fs.hpp"
+#include "common/status_utils.hpp"
 
 using std::list;
 using std::set;
@@ -85,6 +97,82 @@ Try<bool> supported(const string& fsname)
 
   return false;
 }
+
+
+Try<bool> dtypeSupported(const string& directory)
+{
+  DIR* dir = ::opendir(directory.c_str());
+
+  if (dir == nullptr) {
+    return ErrnoError("Failed to open '" + directory + "'");
+  }
+
+  bool result = true;
+  struct dirent* entry;
+
+  errno = 0;
+  while ((entry = ::readdir(dir)) != nullptr) {
+    if (entry->d_type == DT_UNKNOWN) {
+      result = false;
+    }
+  }
+
+  if (errno != 0) {
+    Error error = ErrnoError("Failed to read '" + directory + "'");
+    ::closedir(dir);
+    return error;
+  }
+
+  if (::closedir(dir) == -1) {
+    return ErrnoError("Failed to close '" + directory + "'");
+  }
+
+  return result;
+}
+
+
+Try<uint32_t> type(const string& path)
+{
+  struct statfs buf;
+  if (statfs(path.c_str(), &buf) < 0) {
+    return ErrnoError();
+  }
+  return (uint32_t) buf.f_type;
+}
+
+
+Try<string> typeName(uint32_t fsType)
+{
+  // `typeNames` maps a filesystem id to its filesystem type name.
+  hashmap<uint32_t, string> typeNames = {
+    {FS_TYPE_AUFS      , "aufs"},
+    {FS_TYPE_BTRFS     , "btrfs"},
+    {FS_TYPE_CRAMFS    , "cramfs"},
+    {FS_TYPE_ECRYPTFS  , "ecryptfs"},
+    {FS_TYPE_EXTFS     , "extfs"},
+    {FS_TYPE_F2FS      , "f2fs"},
+    {FS_TYPE_GPFS      , "gpfs"},
+    {FS_TYPE_JFFS2FS   , "jffs2fs"},
+    {FS_TYPE_JFS       , "jfs"},
+    {FS_TYPE_NFSFS     , "nfsfs"},
+    {FS_TYPE_RAMFS     , "ramfs"},
+    {FS_TYPE_REISERFS  , "reiserfs"},
+    {FS_TYPE_SMBFS     , "smbfs"},
+    {FS_TYPE_SQUASHFS  , "squashfs"},
+    {FS_TYPE_TMPFS     , "tmpfs"},
+    {FS_TYPE_VXFS      , "vxfs"},
+    {FS_TYPE_XFS       , "xfs"},
+    {FS_TYPE_ZFS       , "zfs"},
+    {FS_TYPE_OVERLAY   , "overlay"}
+  };
+
+  if (!typeNames.contains(fsType)) {
+    return Error("Unexpected filesystem type '" + stringify(fsType) + "'");
+  }
+
+  return typeNames[fsType];
+}
+
 
 Try<MountInfoTable> MountInfoTable::read(
     const string& lines,
@@ -175,6 +263,44 @@ Try<MountInfoTable> MountInfoTable::read(
   }
 
   return MountInfoTable::read(lines.get(), hierarchicalSort);
+}
+
+
+Try<MountInfoTable::Entry> MountInfoTable::findByTarget(
+    const std::string& target)
+{
+  Result<string> realTarget = os::realpath(target);
+  if (!realTarget.isSome()) {
+    return Error(
+        "Failed to get the realpath of '" + target + "'"
+        ": " + (realTarget.isError() ? realTarget.error() : "Not found"));
+  }
+
+  Try<MountInfoTable> table = read(None(), true);
+  if (table.isError()) {
+    return Error("Failed to get mount table: " + table.error());
+  }
+
+  // Trying to find the mount entry that contains the 'realTarget'. We
+  // achieve that by doing a reverse traverse of the mount table to
+  // find the first entry whose target is a prefix of the specified
+  // 'realTarget'.
+  foreach (const Entry& entry, adaptor::reverse(table->entries)) {
+    if (entry.target == realTarget.get()) {
+      return entry;
+    }
+
+    // NOTE: We have to use `path::join(entry.target, "")` here
+    // to make sure the parent is a directory.
+    if (strings::startsWith(realTarget.get(), path::join(entry.target, ""))) {
+      return entry;
+    }
+  }
+
+  // It's unlikely that we cannot find the immediate parent because
+  // '/' is always mounted and will be the immediate parent if no
+  // other mounts found in between.
+  return Error("Not found");
 }
 
 
@@ -422,6 +548,24 @@ Try<Nothing> unmountAll(const string& target, int flags)
       if (unmount.isError()) {
         return unmount;
       }
+
+      // This normally should not fail even if the entry is not in
+      // mtab or mtab doesn't exist or is not writable. However we
+      // still catch the error here in case there's an error somewhere
+      // else while running this command.
+      // TODO(xujyan): Consider using `setmntent(3)` to implement this.
+      int status = os::spawn("umount", {"umount", "--fake", entry.dir});
+
+      const string message =
+        "Failed to clean up '" + entry.dir + "' in /etc/mtab";
+
+      if (status == -1) {
+        return ErrnoError(message);
+      }
+
+      if (!WSUCCEEDED(status)) {
+        return Error(message + ": " + WSTRINGIFY(status));
+      }
     }
   }
 
@@ -471,7 +615,12 @@ namespace chroot {
 
 namespace internal {
 
-Try<Nothing> copyDeviceNode(const string& source, const string& target)
+// Make the source device node appear at the target path. We prefer to
+// `mknod` the device node since that avoids an otherwise unnecessary
+// mount table entry. The `mknod` can fail if we are in a user namespace
+// or if the devices cgroup is restricting that device. In that case, we
+// bind mount the device to the target path.
+Try<Nothing> importDeviceNode(const string& source, const string& target)
 {
   // We are likely to be operating in a multi-threaded environment so
   // it's not safe to change the umask. Instead, we'll explicitly set
@@ -487,13 +636,23 @@ Try<Nothing> copyDeviceNode(const string& source, const string& target)
   }
 
   Try<Nothing> mknod = os::mknod(target, mode.get(), dev.get());
-  if (mknod.isError()) {
-    return Error("Failed to create device:" +  mknod.error());
+  if (mknod.isSome()) {
+    Try<Nothing> chmod = os::chmod(target, mode.get());
+    if (chmod.isError()) {
+      return Error("Failed to chmod device: " + chmod.error());
+    }
+
+    return Nothing();
   }
 
-  Try<Nothing> chmod = os::chmod(target, mode.get());
-  if (chmod.isError()) {
-    return Error("Failed to chmod device: " + chmod.error());
+  Try<Nothing> touch = os::touch(target);
+  if (touch.isError()) {
+    return Error("Failed to create device mount point: " + touch.error());
+  }
+
+  Try<Nothing> mnt = fs::mount(source, target, None(), MS_BIND, None());
+  if (mnt.isError()) {
+    return Error("Failed to bind device: " + touch.error());
   }
 
   return Nothing();
@@ -522,12 +681,12 @@ Try<Nothing> mountSpecialFilesystems(const string& root)
   // List of special filesystems useful for a chroot environment.
   // NOTE: This list is ordered, e.g., mount /proc before bind
   // mounting /proc/sys and then making it read-only.
-  vector<Mount> mounts = {
+  const vector<Mount> mounts = {
     {"proc",      "/proc",     "proc",   None(),      MS_NOSUID | MS_NOEXEC | MS_NODEV},             // NOLINT(whitespace/line_length)
     {"/proc/sys", "/proc/sys", None(),   None(),      MS_BIND},
     {None(),      "/proc/sys", None(),   None(),      MS_BIND | MS_RDONLY | MS_REMOUNT},             // NOLINT(whitespace/line_length)
     {"sysfs",     "/sys",      "sysfs",  None(),      MS_RDONLY | MS_NOSUID | MS_NOEXEC | MS_NODEV}, // NOLINT(whitespace/line_length)
-    {"tmpfs",     "/dev",      "tmpfs",  "mode=755",  MS_NOSUID | MS_STRICTATIME},                   // NOLINT(whitespace/line_length)
+    {"tmpfs",     "/dev",      "tmpfs",  "mode=755",  MS_NOSUID | MS_STRICTATIME | MS_NOEXEC},       // NOLINT(whitespace/line_length)
     {"devpts",    "/dev/pts",  "devpts", "newinstance,ptmxmode=0666", MS_NOSUID | MS_NOEXEC},        // NOLINT(whitespace/line_length)
     {"tmpfs",     "/dev/shm",  "tmpfs",  "mode=1777", MS_NOSUID | MS_NODEV | MS_STRICTATIME},        // NOLINT(whitespace/line_length)
   };
@@ -601,24 +760,25 @@ Try<Nothing> createStandardDevices(const string& root)
     }
   }
 
-  // Inject each device into the chroot environment. Copy both the
+  // Import each device into the chroot environment. Copy both the
   // mode and the device itself from the corresponding host device.
   foreach (const string& device, devices) {
-    Try<Nothing> copy = copyDeviceNode(
+    Try<Nothing> import = importDeviceNode(
         path::join("/",  "dev", device),
         path::join(root, "dev", device));
 
-    if (copy.isError()) {
-      return Error("Failed to copy device '" + device + "': " + copy.error());
+    if (import.isError()) {
+      return Error(
+          "Failed to import device '" + device + "': " + import.error());
     }
   }
 
-  vector<SymLink> symlinks = {
+  const vector<SymLink> symlinks = {
     {"/proc/self/fd",   path::join(root, "dev", "fd")},
     {"/proc/self/fd/0", path::join(root, "dev", "stdin")},
     {"/proc/self/fd/1", path::join(root, "dev", "stdout")},
     {"/proc/self/fd/2", path::join(root, "dev", "stderr")},
-    {"pts/ptmx",       path::join(root, "dev", "ptmx")}
+    {"pts/ptmx",        path::join(root, "dev", "ptmx")}
   };
 
   foreach (const SymLink& symlink, symlinks) {

@@ -39,6 +39,7 @@
 #include <process/owned.hpp>
 #include <process/reap.hpp>
 
+#include <stout/exit.hpp>
 #include <stout/gtest.hpp>
 #include <stout/hashmap.hpp>
 #include <stout/numify.hpp>
@@ -49,6 +50,7 @@
 #include <stout/stringify.hpp>
 #include <stout/strings.hpp>
 
+#include <stout/os/constants.hpp>
 #include <stout/os/pagesize.hpp>
 
 #include "linux/cgroups.hpp"
@@ -167,7 +169,7 @@ protected:
       }
 
       Try<vector<string>> cgroups = cgroups::get(hierarchy);
-      CHECK_SOME(cgroups);
+      ASSERT_SOME(cgroups);
 
       foreach (const string& cgroup, cgroups.get()) {
         // Remove any cgroups that start with TEST_CGROUPS_ROOT.
@@ -185,11 +187,15 @@ protected:
       string hierarchy = path::join(baseHierarchy, subsystem);
 
       Try<vector<string>> cgroups = cgroups::get(hierarchy);
-      CHECK_SOME(cgroups);
+      ASSERT_SOME(cgroups);
 
       foreach (const string& cgroup, cgroups.get()) {
         // Remove any cgroups that start with TEST_CGROUPS_ROOT.
         if (cgroup == TEST_CGROUPS_ROOT) {
+          // Since we are tearing down the tests, kill any processes
+          // that might remain. Any remaining zombie processes will
+          // not prevent the destroy from succeeding.
+          EXPECT_SOME(cgroups::kill(hierarchy, cgroup, SIGKILL));
           AWAIT_READY(cgroups::destroy(hierarchy, cgroup));
         }
       }
@@ -471,6 +477,8 @@ TEST_F(CgroupsAnyHierarchyTest, ROOT_CGROUPS_Write)
       cgroups::write(hierarchy, TEST_CGROUPS_ROOT, "invalid", "invalid"));
 
   ASSERT_SOME(cgroups::create(hierarchy, TEST_CGROUPS_ROOT));
+  EXPECT_ERROR(
+      cgroups::write(hierarchy, TEST_CGROUPS_ROOT, "cpu.shares", "invalid"));
 
   pid_t pid = ::fork();
   ASSERT_NE(-1, pid);
@@ -479,12 +487,8 @@ TEST_F(CgroupsAnyHierarchyTest, ROOT_CGROUPS_Write)
     // In child process, wait for kill signal.
     while (true) { sleep(1); }
 
-    // Should not reach here.
-    const char* message = "Error, child should be killed before reaching here";
-    while (write(STDERR_FILENO, message, strlen(message)) == -1 &&
-           errno == EINTR);
-
-    _exit(EXIT_FAILURE);
+    SAFE_EXIT(
+        EXIT_FAILURE, "Error, child should be killed before reaching here");
   }
 
   // In parent process.
@@ -570,13 +574,13 @@ TEST_F(CgroupsAnyHierarchyWithCpuMemoryTest, ROOT_CGROUPS_Listen)
 
   // TODO(vinod): Instead of asserting here dynamically disable
   // the test if swap is enabled on the host.
-  ASSERT_EQ(memory.get().totalSwap, Bytes(0))
+  ASSERT_EQ(memory->totalSwap, Bytes(0))
     << "-------------------------------------------------------------\n"
     << "We cannot run this test because it appears you have swap\n"
     << "enabled, but feel free to disable this test.\n"
     << "-------------------------------------------------------------";
 
-  const Bytes limit =  Megabytes(64);
+  const Bytes limit = Megabytes(64);
 
   ASSERT_SOME(cgroups::memory::limit_in_bytes(
       hierarchy, TEST_CGROUPS_ROOT, limit));
@@ -837,10 +841,10 @@ TEST_F(CgroupsAnyHierarchyWithFreezerTest, ROOT_CGROUPS_AssignThreads)
   Try<set<pid_t>> cgroupThreads =
     cgroups::threads(hierarchy, TEST_CGROUPS_ROOT);
   EXPECT_SOME(cgroupThreads);
-  EXPECT_EQ(0u, cgroupThreads->size());
+  EXPECT_TRUE(cgroupThreads->empty());
 
   // Assign ourselves to the test cgroup.
-  CHECK_SOME(cgroups::assign(hierarchy, TEST_CGROUPS_ROOT, ::getpid()));
+  ASSERT_SOME(cgroups::assign(hierarchy, TEST_CGROUPS_ROOT, ::getpid()));
 
   // Get our threads (may be more than the numThreads we created if
   // other threads are running).
@@ -863,7 +867,7 @@ TEST_F(CgroupsAnyHierarchyWithFreezerTest, ROOT_CGROUPS_AssignThreads)
   delete latch;
 
   // Move ourselves to the root cgroup.
-  CHECK_SOME(cgroups::assign(hierarchy, "", ::getpid()));
+  ASSERT_SOME(cgroups::assign(hierarchy, "", ::getpid()));
 
   // Destroy the cgroup.
   AWAIT_READY(cgroups::destroy(hierarchy, TEST_CGROUPS_ROOT));
@@ -1090,7 +1094,7 @@ TEST_F(CgroupsAnyHierarchyMemoryPressureTest, ROOT_IncreaseRSS)
 
   // TODO(vinod): Instead of asserting here dynamically disable
   // the test if swap is enabled on the host.
-  ASSERT_EQ(memory.get().totalSwap, Bytes(0))
+  ASSERT_EQ(memory->totalSwap, Bytes(0))
     << "-------------------------------------------------------------\n"
     << "We cannot run this test because it appears you have swap\n"
     << "enabled, but feel free to disable this test.\n"
@@ -1251,6 +1255,7 @@ TEST_F(CgroupsAnyHierarchyMemoryPressureTest, ROOT_IncreasePageCache)
   EXPECT_LT(0u, low);
 }
 
+
 // Tests the cpuacct::stat API. This test just tests for ANY value returned by
 // the API.
 TEST_F(CgroupsAnyHierarchyWithCpuAcctMemoryTest, ROOT_CGROUPS_CpuAcctsStats)
@@ -1258,12 +1263,12 @@ TEST_F(CgroupsAnyHierarchyWithCpuAcctMemoryTest, ROOT_CGROUPS_CpuAcctsStats)
   const string hierarchy = path::join(baseHierarchy, "cpuacct");
   ASSERT_SOME(cgroups::create(hierarchy, TEST_CGROUPS_ROOT));
 
-  CHECK_SOME(cgroups::assign(hierarchy, TEST_CGROUPS_ROOT, ::getpid()));
+  ASSERT_SOME(cgroups::assign(hierarchy, TEST_CGROUPS_ROOT, ::getpid()));
 
   ASSERT_SOME(cgroups::cpuacct::stat(hierarchy, TEST_CGROUPS_ROOT));
 
   // Move ourselves to the root cgroup.
-  CHECK_SOME(cgroups::assign(hierarchy, "", ::getpid()));
+  ASSERT_SOME(cgroups::assign(hierarchy, "", ::getpid()));
 
   AWAIT_READY(cgroups::destroy(hierarchy, TEST_CGROUPS_ROOT));
 }
@@ -1328,7 +1333,7 @@ TEST_F(CgroupsAnyHierarchyDevicesTest, ROOT_CGROUPS_Devices)
   ASSERT_SOME(cgroups::create(hierarchy, TEST_CGROUPS_ROOT));
 
   // Assign ourselves to the cgroup.
-  CHECK_SOME(cgroups::assign(hierarchy, TEST_CGROUPS_ROOT, ::getpid()));
+  ASSERT_SOME(cgroups::assign(hierarchy, TEST_CGROUPS_ROOT, ::getpid()));
 
   // When a devices cgroup is first created, its whitelist inherits
   // all devices from its parent's whitelist (i.e., "a *:* rwm" by
@@ -1366,7 +1371,7 @@ TEST_F(CgroupsAnyHierarchyDevicesTest, ROOT_CGROUPS_Devices)
   EXPECT_TRUE(whitelist->empty());
 
   // Verify that we can't open /dev/null.
-  Try<int> fd = os::open("/dev/null", O_RDWR);
+  Try<int_fd> fd = os::open(os::DEV_NULL, O_RDWR);
   EXPECT_ERROR(fd);
 
   // Add /dev/null to the list of allowed devices.
@@ -1391,14 +1396,14 @@ TEST_F(CgroupsAnyHierarchyDevicesTest, ROOT_CGROUPS_Devices)
   EXPECT_EQ(entry.get(), whitelist.get()[0]);
 
   // Verify that we can now open and write to /dev/null.
-  fd = os::open("/dev/null", O_WRONLY);
+  fd = os::open(os::DEV_NULL, O_WRONLY);
   ASSERT_SOME(fd);
 
   Try<Nothing> write = os::write(fd.get(), "nonsense");
   EXPECT_SOME(write);
 
   // Move ourselves to the root cgroup.
-  CHECK_SOME(cgroups::assign(hierarchy, "", ::getpid()));
+  ASSERT_SOME(cgroups::assign(hierarchy, "", ::getpid()));
 }
 
 } // namespace tests {

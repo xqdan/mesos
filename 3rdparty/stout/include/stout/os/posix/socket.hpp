@@ -13,6 +13,7 @@
 #ifndef __STOUT_OS_POSIX_SOCKET_HPP__
 #define __STOUT_OS_POSIX_SOCKET_HPP__
 
+#include <errno.h>
 #include <unistd.h>
 
 #include <sys/socket.h>
@@ -21,13 +22,14 @@
 namespace net {
 
 // Import `socket` functions into `net::` namespace.
+using ::accept;
 using ::bind;
 using ::connect;
 using ::recv;
 using ::send;
 
 // The error indicates the last socket operation has been
-// interupted, the operation can be restarted imediately.
+// interupted, the operation can be restarted immediately.
 inline bool is_restartable_error(int error)
 {
   return (error == EINTR);
@@ -39,7 +41,7 @@ inline bool is_restartable_error(int error)
 // retry the operation later.
 inline bool is_retryable_error(int error)
 {
-  return (error ==  EWOULDBLOCK || error == EAGAIN);
+  return (error == EWOULDBLOCK || error == EAGAIN);
 }
 
 
@@ -52,7 +54,7 @@ inline bool is_inprogress_error(int error)
 inline bool is_socket(int fd)
 {
   struct stat statbuf;
-  if (fstat(fd, &statbuf) < 0) {
+  if (::fstat(fd, &statbuf) < 0) {
     return false;
   }
 

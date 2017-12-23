@@ -16,6 +16,16 @@
 
 #include <stdint.h>
 
+#include <sys/mount.h>
+
+// This header include must be enclosed in an `extern "C"` block to
+// workaround a bug in glibc <= 2.12 (see MESOS-7378).
+//
+// TODO(neilc): Remove this when we no longer support glibc <= 2.12.
+extern "C" {
+#include <sys/sysmacros.h>
+}
+
 #include <algorithm>
 #include <list>
 #include <map>
@@ -57,6 +67,7 @@ using mesos::slave::ContainerClass;
 using mesos::slave::ContainerConfig;
 using mesos::slave::ContainerLaunchInfo;
 using mesos::slave::ContainerLimitation;
+using mesos::slave::ContainerMountInfo;
 using mesos::slave::ContainerState;
 using mesos::slave::Isolator;
 
@@ -157,6 +168,23 @@ Try<Isolator*> NvidiaGpuIsolatorProcess::create(
 
   deviceEntries[Path("/dev/nvidiactl")] = entry;
 
+  // The `nvidia-uvm` module is not typically loaded by default on
+  // systems that have Nvidia GPU drivers installed. Instead,
+  // applications that require this module use `nvidia-modprobe` to
+  // load it dynamically on first use. This program both loads the
+  // `nvidia-uvm` kernel module and creates the corresponding
+  // `/dev/nvidia-uvm` device that it controls.
+  //
+  // We call `nvidia-modprobe` here to ensure that `/dev/nvidia-uvm`
+  // is properly created so we can inject it into any containers that
+  // may require it.
+  if (!os::exists("/dev/nvidia-uvm")) {
+    Try<string> modprobe = os::shell("nvidia-modprobe -u -c 0");
+    if (modprobe.isError()) {
+      return Error("Failed to load '/dev/nvidia-uvm': " + modprobe.error());
+    }
+  }
+
   device = os::stat::rdev("/dev/nvidia-uvm");
   if (device.isError()) {
     return Error("Failed to obtain device ID for '/dev/nvidia-uvm': " +
@@ -197,6 +225,12 @@ Try<Isolator*> NvidiaGpuIsolatorProcess::create(
 
 
 bool NvidiaGpuIsolatorProcess::supportsNesting()
+{
+  return true;
+}
+
+
+bool NvidiaGpuIsolatorProcess::supportsStandalone()
 {
   return true;
 }
@@ -326,7 +360,7 @@ Future<Option<ContainerLaunchInfo>> NvidiaGpuIsolatorProcess::prepare(
     }
   }
 
-  return update(containerId, containerConfig.executor_info().resources())
+  return update(containerId, containerConfig.resources())
     .then(defer(PID<NvidiaGpuIsolatorProcess>(this),
                 &NvidiaGpuIsolatorProcess::_prepare,
                 containerConfig));
@@ -375,9 +409,15 @@ Future<Option<ContainerLaunchInfo>> NvidiaGpuIsolatorProcess::_prepare(
           " '" + target + "': " + mkdir.error());
     }
 
-    launchInfo.add_pre_exec_commands()->set_value(
-      "mount --no-mtab --rbind --read-only " +
-      volume.HOST_PATH() + " " + target);
+    ContainerMountInfo* mount = launchInfo.add_mounts();
+    mount->set_source(volume.HOST_PATH());
+    mount->set_target(target);
+    mount->set_flags(MS_RDONLY | MS_BIND | MS_REC);
+
+    // NOTE: MS_REMOUNT is needed to make a bind mount read only.
+    mount = launchInfo.add_mounts();
+    mount->set_target(target);
+    mount->set_flags(MS_RDONLY | MS_REMOUNT | MS_BIND | MS_REC);
   }
 
   return launchInfo;

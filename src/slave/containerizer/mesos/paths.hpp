@@ -22,6 +22,8 @@
 #include <string>
 #include <vector>
 
+#include <process/address.hpp>
+
 #include <stout/result.hpp>
 #include <stout/try.hpp>
 
@@ -35,10 +37,44 @@ namespace slave {
 namespace containerizer {
 namespace paths {
 
+
+// The containerizer uses the runtime directory to checkpoint things
+// for each container, like the PID of the first process executed
+// within a container (i.e., the "PID 1") or the LaunchInfo associated
+// with the given container.
+//
+// The file system layout is as follows:
+//
+//   root ('--runtime_dir' flag)
+//   |-- containers
+//       |-- <container_id>
+//           |-- config
+//           |-- containers
+//           |   |-- <container_id>
+//           |   |   |-- <more nesting of containers>
+//           |   |-- pid
+//           |   |-- ...
+//           |-- force_destroy_on_recovery
+//           |-- io_switchboard
+//           |   |-- pid
+//           |   |-- socket
+//           |-- launch_info
+//           |-- pid
+//           |-- standalone.marker
+//           |-- status
+//           |-- termination
+
+
 constexpr char PID_FILE[] = "pid";
+constexpr char CONTAINER_CONFIG_FILE[] = "config";
 constexpr char STATUS_FILE[] = "status";
 constexpr char TERMINATION_FILE[] = "termination";
+constexpr char SOCKET_FILE[] = "socket";
+constexpr char FORCE_DESTROY_ON_RECOVERY_FILE[] = "force_destroy_on_recovery";
+constexpr char IO_SWITCHBOARD_DIRECTORY[] = "io_switchboard";
 constexpr char CONTAINER_DIRECTORY[] = "containers";
+constexpr char CONTAINER_LAUNCH_INFO_FILE[] = "launch_info";
+constexpr char STANDALONE_MARKER_FILE[] = "standalone.marker";
 
 
 enum Mode
@@ -63,19 +99,9 @@ std::string buildPath(
     const Mode& mode);
 
 
-// The containerizer uses the runtime directory (flag 'runtime_dir')
-// to checkpoint things for each container, e.g., the PID of the first
-// process executed within a container (i.e., the "PID 1") gets
-// checkpointed in a file called 'pid'. The following helper function
-// constructs the path for a container given the 'runtimeDir' that was
-// used as well as the container `containerId`. For example, given two
-// containers, one with ID 'a9dd' and one nested within 'a9dd' with ID
-// '4e3a' and with the flag 'runtime_dir' set to '/var/run/mesos' you
-// would have a directory structure that looks like:
-//
-// /var/run/mesos/containers/a9dd
-// /var/run/mesos/containers/a9dd/pid
-// /var/run/mesos/containers/a9dd/containers/4e3a/pid
+// The following helper function constructs the path
+// for a container given the 'runtimeDir' that was
+// used as well as the container `containerId`.
 std::string getRuntimePath(
     const std::string& runtimeDir,
     const ContainerID& containerId);
@@ -93,8 +119,73 @@ Result<int> getContainerStatus(
     const ContainerID& containerId);
 
 
+#ifndef __WINDOWS__
+// The helper method to get the io switchboard directory path.
+std::string getContainerIOSwitchboardPath(
+    const std::string& runtimeDir,
+    const ContainerID& containerId);
+
+
+// The helper method to get the io switchboard pid file path.
+std::string getContainerIOSwitchboardPidPath(
+    const std::string& runtimeDir,
+    const ContainerID& containerId);
+
+
+// The helper method to get the io switchboard pid.
+Result<pid_t> getContainerIOSwitchboardPid(
+    const std::string& runtimeDir,
+    const ContainerID& containerId);
+
+
+// The helper method to get the socket file path.
+std::string getContainerIOSwitchboardSocketPath(
+    const std::string& runtimeDir,
+    const ContainerID& containerId);
+
+
+// The helper method to read the io switchboard socket file.
+Result<process::network::unix::Address> getContainerIOSwitchboardAddress(
+    const std::string& runtimeDir,
+    const ContainerID& containerId);
+#endif
+
+
+// The helper method to get the destroy on recovery file path.
+std::string getContainerForceDestroyOnRecoveryPath(
+    const std::string& runtimeDir,
+    const ContainerID& containerId);
+
+
+// The helper method to check if we should
+// destroy a container on recovery or not.
+bool getContainerForceDestroyOnRecovery(
+    const std::string& runtimeDir,
+    const ContainerID& containerId);
+
+
 // The helper method to read the container termination state.
 Result<mesos::slave::ContainerTermination> getContainerTermination(
+    const std::string& runtimeDir,
+    const ContainerID& containerId);
+
+
+// The helper method to get the standalone container marker path.
+std::string getStandaloneContainerMarkerPath(
+    const std::string& runtimeDir,
+    const ContainerID& containerId);
+
+
+// The helper method to check if the given container is a standalone
+// container or not. This is determined by the existence (or not) of
+// a marker file in the container's runtime metadata directory.
+bool isStandaloneContainer(
+    const std::string& runtimeDir,
+    const ContainerID& containerId);
+
+
+// The helper method to read the launch config of the contaienr.
+Result<mesos::slave::ContainerConfig> getContainerConfig(
     const std::string& runtimeDir,
     const ContainerID& containerId);
 
@@ -105,6 +196,19 @@ Result<mesos::slave::ContainerTermination> getContainerTermination(
 // is inserted before its children).
 Try<std::vector<ContainerID>> getContainerIds(
     const std::string& runtimeDir);
+
+
+// The helper method to get the container launch information path.
+std::string getContainerLaunchInfoPath(
+    const std::string& runtimeDir,
+    const ContainerID& containerId);
+
+
+// The helper method to get the container launch information
+// at the moment it was launched.
+Result<mesos::slave::ContainerLaunchInfo> getContainerLaunchInfo(
+    const std::string& runtimeDir,
+    const ContainerID& containerId);
 
 
 // The helper method to get the sandbox path.

@@ -22,6 +22,7 @@
 #include <mesos/executor.hpp>
 #include <mesos/mesos.hpp>
 
+#include <process/delay.hpp>
 #include <process/id.hpp>
 #include <process/owned.hpp>
 #include <process/process.hpp>
@@ -32,11 +33,14 @@
 #include <stout/error.hpp>
 #include <stout/flags.hpp>
 #include <stout/json.hpp>
+#include <stout/lambda.hpp>
 #include <stout/os.hpp>
 #include <stout/protobuf.hpp>
 #include <stout/try.hpp>
 
 #include <stout/os/killtree.hpp>
+
+#include "checks/health_checker.hpp"
 
 #include "common/protobuf_utils.hpp"
 #include "common/status_utils.hpp"
@@ -44,11 +48,10 @@
 #include "docker/docker.hpp"
 #include "docker/executor.hpp"
 
-#include "health-check/health_checker.hpp"
-
 #include "logging/flags.hpp"
 #include "logging/logging.hpp"
 
+#include "messages/flags.hpp"
 #include "messages/messages.hpp"
 
 #include "slave/constants.hpp"
@@ -69,6 +72,7 @@ namespace docker {
 
 const Duration DOCKER_INSPECT_DELAY = Milliseconds(500);
 const Duration DOCKER_INSPECT_TIMEOUT = Seconds(5);
+const Duration KILL_RETRY_INTERVAL = Seconds(5);
 
 // Executor that is responsible to execute a docker container and
 // redirect log output to configured stdout and stderr files. Similar
@@ -85,11 +89,14 @@ public:
       const string& mappedDirectory,
       const Duration& shutdownGracePeriod,
       const string& launcherDir,
-      const map<string, string>& taskEnvironment)
+      const map<string, string>& taskEnvironment,
+      const Option<ContainerDNSInfo>& defaultContainerDNS,
+      bool cgroupsEnableCfs)
     : ProcessBase(ID::generate("docker-executor")),
       killed(false),
-      killedByHealthCheck(false),
       terminated(false),
+      killedByHealthCheck(false),
+      killingInProgress(false),
       launcherDir(launcherDir),
       docker(docker),
       containerName(containerName),
@@ -97,6 +104,8 @@ public:
       mappedDirectory(mappedDirectory),
       shutdownGracePeriod(shutdownGracePeriod),
       taskEnvironment(taskEnvironment),
+      defaultContainerDNS(defaultContainerDNS),
+      cgroupsEnableCfs(cgroupsEnableCfs),
       stop(Nothing()),
       inspect(Nothing()) {}
 
@@ -108,7 +117,7 @@ public:
       const FrameworkInfo& _frameworkInfo,
       const SlaveInfo& slaveInfo)
   {
-    cout << "Registered docker executor on " << slaveInfo.hostname() << endl;
+    LOG(INFO) << "Registered docker executor on " << slaveInfo.hostname();
     driver = _driver;
     frameworkInfo = _frameworkInfo;
   }
@@ -117,17 +126,19 @@ public:
       ExecutorDriver* driver,
       const SlaveInfo& slaveInfo)
   {
-    cout << "Re-registered docker executor on " << slaveInfo.hostname() << endl;
+    LOG(INFO) << "Re-registered docker executor on " << slaveInfo.hostname();
   }
 
   void disconnected(ExecutorDriver* driver)
   {
-    cout << "Disconnected from the agent" << endl;
+    LOG(INFO) << "Disconnected from the agent";
   }
 
   void launchTask(ExecutorDriver* driver, const TaskInfo& task)
   {
     if (run.isSome()) {
+      // TODO(alexr): Use `protobuf::createTaskStatus()`
+      // instead of manually setting fields.
       TaskStatus status;
       status.mutable_task_id()->CopyFrom(task.task_id());
       status.set_state(TASK_FAILED);
@@ -146,12 +157,50 @@ public:
       killPolicy = task.kill_policy();
     }
 
-    cout << "Starting task " << taskId.get() << endl;
+    LOG(INFO) << "Starting task " << taskId.get();
+
+    // Send initial TASK_STARTING update.
+    // TODO(alexr): Use `protobuf::createTaskStatus()`
+    // instead of manually setting fields.
+    TaskStatus starting;
+    starting.mutable_task_id()->CopyFrom(task.task_id());
+    starting.set_state(TASK_STARTING);
+    driver->sendStatusUpdate(starting);
 
     CHECK(task.has_container());
     CHECK(task.has_command());
 
     CHECK(task.container().type() == ContainerInfo::DOCKER);
+
+    Try<Docker::RunOptions> runOptions = Docker::RunOptions::create(
+        task.container(),
+        task.command(),
+        containerName,
+        sandboxDirectory,
+        mappedDirectory,
+        task.resources() + task.executor().resources(),
+        cgroupsEnableCfs,
+        taskEnvironment,
+        None(), // No extra devices.
+        defaultContainerDNS
+    );
+
+    if (runOptions.isError()) {
+      // TODO(alexr): Use `protobuf::createTaskStatus()`
+      // instead of manually setting fields.
+      TaskStatus status;
+      status.mutable_task_id()->CopyFrom(task.task_id());
+      status.set_state(TASK_FAILED);
+      status.set_message(
+        "Failed to create docker run options: " + runOptions.error());
+
+      LOG(ERROR) << status.message();
+
+      driver->sendStatusUpdate(status);
+
+      _stop();
+      return;
+    }
 
     // We're adding task and executor resources to launch docker since
     // the DockerContainerizer updates the container cgroup limits
@@ -160,14 +209,7 @@ public:
     // resources for running this executor, but we are assuming
     // this is just a very small amount of overcommit.
     run = docker->run(
-        task.container(),
-        task.command(),
-        containerName,
-        sandboxDirectory,
-        mappedDirectory,
-        task.resources() + task.executor().resources(),
-        taskEnvironment,
-        None(), // No extra devices.
+        runOptions.get(),
         Subprocess::FD(STDOUT_FILENO),
         Subprocess::FD(STDERR_FILENO));
 
@@ -183,16 +225,14 @@ public:
         if (!killed) {
           containerPid = container.pid;
 
+          // TODO(alexr): Use `protobuf::createTaskStatus()`
+          // instead of manually setting fields.
           TaskStatus status;
           status.mutable_task_id()->CopyFrom(taskId.get());
           status.set_state(TASK_RUNNING);
           status.set_data(container.output);
-          if (container.ipAddress.isSome()) {
-            // TODO(karya): Deprecated -- Remove after 0.25.0 has shipped.
-            Label* label = status.mutable_labels()->add_labels();
-            label->set_key("Docker.NetworkSettings.IPAddress");
-            label->set_value(container.ipAddress.get());
-
+          if (container.ipAddress.isSome() ||
+              container.ip6Address.isSome()) {
             NetworkInfo* networkInfo =
               status.mutable_container_status()->add_network_infos();
 
@@ -204,8 +244,26 @@ public:
               networkInfo->clear_ip_addresses();
             }
 
-            NetworkInfo::IPAddress* ipAddress = networkInfo->add_ip_addresses();
-            ipAddress->set_ip_address(container.ipAddress.get());
+            auto setIPAddresses = [=](const string& ip, bool ipv6) {
+              NetworkInfo::IPAddress* ipAddress =
+                networkInfo->add_ip_addresses();
+
+              ipAddress->set_ip_address(ip);
+
+              // NOTE: By default the protocol is set to IPv4 and therefore
+              // we explicitly set the protocol only for an IPv6 address.
+              if (ipv6) {
+                ipAddress->set_protocol(NetworkInfo::IPv6);
+              }
+            };
+
+            if (container.ipAddress.isSome()) {
+              setIPAddresses(container.ipAddress.get(), false);
+            }
+
+            if (container.ip6Address.isSome()) {
+              setIPAddresses(container.ip6Address.get(), true);
+            }
 
             containerNetworkInfo = *networkInfo;
           }
@@ -216,13 +274,15 @@ public:
       }));
 
     inspect.onFailed(defer(self(), [=](const string& failure) {
-      cerr << "Failed to inspect container '" << containerName << "'"
-           << ": " << failure << endl;
+      LOG(ERROR) << "Failed to inspect container '" << containerName << "'"
+                 << ": " << failure;
 
       // TODO(bmahler): This is fatal, try to shut down cleanly.
       // Since we don't have a container id, we can only discard
       // the run future.
     }));
+
+    inspect.onReady(defer(self(), &Self::launchCheck, task));
 
     inspect.onReady(
         defer(self(), &Self::launchHealthCheck, containerName, task));
@@ -230,7 +290,7 @@ public:
 
   void killTask(ExecutorDriver* driver, const TaskID& taskId)
   {
-    cout << "Received killTask for task " << taskId.value() << endl;
+    LOG(INFO) << "Received killTask for task " << taskId.value();
 
     // Using shutdown grace period as a default is backwards compatible
     // with the `stop_timeout` flag, deprecated in 1.0.
@@ -247,7 +307,7 @@ public:
 
   void shutdown(ExecutorDriver* driver)
   {
-    cout << "Shutting down" << endl;
+    LOG(INFO) << "Shutting down";
 
     // Currently, 'docker->run' uses the reaper internally, hence we need
     // to account for the reap interval. We also leave a small buffer of
@@ -277,19 +337,7 @@ public:
   void error(ExecutorDriver* driver, const string& message) {}
 
 protected:
-  virtual void initialize()
-  {
-    install<TaskHealthStatus>(
-        &Self::taskHealthUpdated,
-        &TaskHealthStatus::task_id,
-        &TaskHealthStatus::healthy,
-        &TaskHealthStatus::kill_task);
-  }
-
-  void taskHealthUpdated(
-      const TaskID& taskID,
-      const bool& healthy,
-      const bool& initiateTaskKill)
+  void taskHealthUpdated(const TaskHealthStatus& healthStatus)
   {
     if (driver.isNone()) {
       return;
@@ -297,17 +345,20 @@ protected:
 
     // This check prevents us from sending `TASK_RUNNING` updates
     // after the task has been transitioned to `TASK_KILLING`.
-    if (killed) {
+    if (killed || terminated) {
       return;
     }
 
-    cout << "Received task health update, healthy: "
-         << stringify(healthy) << endl;
+    LOG(INFO) << "Received task health update, healthy: "
+              << stringify(healthStatus.healthy());
 
+    // TODO(alexr): Use `protobuf::createTaskStatus()`
+    // instead of manually setting fields.
     TaskStatus status;
-    status.mutable_task_id()->CopyFrom(taskID);
-    status.set_healthy(healthy);
+    status.mutable_task_id()->CopyFrom(healthStatus.task_id());
+    status.set_healthy(healthStatus.healthy());
     status.set_state(TASK_RUNNING);
+    status.set_reason(TaskStatus::REASON_TASK_HEALTH_CHECK_STATUS_UPDATED);
 
     if (containerNetworkInfo.isSome()) {
       status.mutable_container_status()->add_network_infos()->CopyFrom(
@@ -316,9 +367,9 @@ protected:
 
     driver.get()->sendStatusUpdate(status);
 
-    if (initiateTaskKill) {
+    if (healthStatus.kill_task()) {
       killedByHealthCheck = true;
-      killTask(driver.get(), taskID);
+      killTask(driver.get(), healthStatus.task_id());
     }
   }
 
@@ -332,12 +383,18 @@ private:
       return;
     }
 
+    // Terminate if a kill task request is received before the task is launched.
+    // This can happen, for example, if `RunTaskMessage` has not been delivered.
+    // See MESOS-8297.
+    CHECK_SOME(run) << "Terminating because kill task message has been"
+                    << " received before the task has been launched";
+
     // TODO(alexr): If a kill is in progress, consider adjusting
     // the grace period if a new one is provided.
 
     // Issue the kill signal if the container is running
-    // and we haven't killed it yet.
-    if (run.isSome() && !killed) {
+    // and kill attempt is not in progress.
+    if (run.isSome() && !killingInProgress) {
       // We have to issue the kill after 'docker inspect' has
       // completed, otherwise we may race with 'docker run'
       // and docker may not know about the container. Note
@@ -356,7 +413,15 @@ private:
     CHECK_SOME(taskId);
     CHECK_EQ(taskId_, taskId.get());
 
-    if (!terminated && !killed) {
+    if (!terminated && !killingInProgress) {
+      killingInProgress = true;
+
+      // Once the task has been transitioned to `killed`,
+      // there is no way back, even if the kill attempt
+      // failed. This also allows us to send TASK_KILLING
+      // only once, regardless of how many kill attempts
+      // have been made.
+      //
       // Because we rely on `killed` to determine whether
       // to send TASK_KILLED, we set `killed` only once the
       // kill is issued. If we set it earlier we're more
@@ -364,28 +429,70 @@ private:
       // signaled the container. Note that in general it's
       // a race between signaling and the container
       // terminating with a non-zero exit status.
-      killed = true;
+      if (!killed) {
+        killed = true;
 
-      // Send TASK_KILLING if the framework can handle it.
-      if (protobuf::frameworkHasCapability(
-              frameworkInfo.get(),
-              FrameworkInfo::Capability::TASK_KILLING_STATE)) {
-        TaskStatus status;
-        status.mutable_task_id()->CopyFrom(taskId.get());
-        status.set_state(TASK_KILLING);
-        driver.get()->sendStatusUpdate(status);
+        // Send TASK_KILLING if the framework can handle it.
+        if (protobuf::frameworkHasCapability(
+                frameworkInfo.get(),
+                FrameworkInfo::Capability::TASK_KILLING_STATE)) {
+          // TODO(alexr): Use `protobuf::createTaskStatus()`
+          // instead of manually setting fields.
+          TaskStatus status;
+          status.mutable_task_id()->CopyFrom(taskId.get());
+          status.set_state(TASK_KILLING);
+          driver.get()->sendStatusUpdate(status);
+        }
+
+        // Stop health checking the task.
+        if (checker.get() != nullptr) {
+          checker->pause();
+        }
       }
 
       // TODO(bmahler): Replace this with 'docker kill' so
       // that we can adjust the grace period in the case of
       // a `KillPolicy` override.
       stop = docker->stop(containerName, gracePeriod);
+
+      // Invoking `docker stop` might be unsuccessful, in which case the
+      // container most probably does not receive the signal. In this case we
+      // should allow schedulers to retry the kill operation or, if the kill
+      // was initiated by a failing health check, retry ourselves. We do not
+      // bail out nor stop retrying to avoid sending a terminal status update
+      // while the container might still be running.
+      //
+      // NOTE: `docker stop` might also hang. We do not address this for now,
+      // because there is no evidence that in this case docker daemon might
+      // function properly, i.e., it's only the docker cli command that hangs,
+      // and hence there is not so much we can do. See MESOS-6743.
+      stop.onFailed(defer(self(), [=](const string& failure) {
+        LOG(ERROR) << "Failed to stop container '" << containerName << "'"
+                   << ": " << failure;
+
+        killingInProgress = false;
+
+        if (killedByHealthCheck) {
+          LOG(INFO) << "Retrying to kill task in " << KILL_RETRY_INTERVAL;
+          delay(
+              KILL_RETRY_INTERVAL,
+              self(),
+              &Self::_killTask,
+              taskId_,
+              gracePeriod);
+        }
+      }));
     }
   }
 
   void reaped(const Future<Option<int>>& run)
   {
     terminated = true;
+
+    // Stop health checking the task.
+    if (checker.get() != nullptr) {
+      checker->pause();
+    }
 
     // In case the stop is stuck, discard it.
     stop.discard();
@@ -420,11 +527,10 @@ private:
       message = "Failed to get exit status of container";
     } else {
       int status = run->get();
-      CHECK(WIFEXITED(status) || WIFSIGNALED(status)) << status;
+      CHECK(WIFEXITED(status) || WIFSIGNALED(status))
+        << "Unexpected wait status " << status;
 
-      if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
-        state = TASK_FINISHED;
-      } else if (killed) {
+      if (killed) {
         // Send TASK_KILLED if the task was killed as a result of
         // kill() or shutdown(). Note that in general there is a
         // race between signaling the container and it terminating
@@ -434,6 +540,8 @@ private:
         // determine whether the container was terminated via
         // our signal or terminated on its own.
         state = TASK_KILLED;
+      } else if (WSUCCEEDED(status)) {
+        state = TASK_FINISHED;
       } else {
         state = TASK_FAILED;
       }
@@ -441,19 +549,30 @@ private:
       message = "Container " + WSTRINGIFY(status);
     }
 
+    LOG(INFO) << message;
+
     CHECK_SOME(taskId);
 
+    // TODO(alexr): Use `protobuf::createTaskStatus()`
+    // instead of manually setting fields.
     TaskStatus taskStatus;
     taskStatus.mutable_task_id()->CopyFrom(taskId.get());
     taskStatus.set_state(state);
     taskStatus.set_message(message);
     if (killed && killedByHealthCheck) {
+      // TODO(abudnik): Consider specifying appropriate status update reason,
+      // saying that the task was killed due to a failing health check.
       taskStatus.set_healthy(false);
     }
 
     CHECK_SOME(driver);
     driver.get()->sendStatusUpdate(taskStatus);
 
+    _stop();
+  }
+
+  void _stop()
+  {
     // A hack for now ... but we need to wait until the status update
     // is sent to the slave before we shut ourselves down.
     // TODO(tnachen): Remove this hack and also the same hack in the
@@ -461,6 +580,12 @@ private:
     // an ack.
     os::sleep(Seconds(1));
     driver.get()->stop();
+  }
+
+  void launchCheck(const TaskInfo& task)
+  {
+    // TODO(alexr): Implement general checks support, see MESOS-7250.
+    CHECK(!task.has_check()) << "Docker executor does not support checks yet";
   }
 
   void launchHealthCheck(const string& containerName, const TaskInfo& task)
@@ -485,8 +610,8 @@ private:
         docker->validateVersion(Version(1, 3, 0));
 
       if (validateVersion.isError()) {
-        cerr << "Unable to launch health check process: "
-             << validateVersion.error() << endl;
+        LOG(ERROR) << "Unable to launch health check process: "
+                   << validateVersion.error();
         return;
       }
 
@@ -526,36 +651,31 @@ private:
       namespaces.push_back("net");
     }
 
-    Try<Owned<health::HealthChecker>> _checker = health::HealthChecker::create(
-        healthCheck,
-        launcherDir,
-        self(),
-        task.task_id(),
-        containerPid,
-        namespaces);
+    Try<Owned<checks::HealthChecker>> _checker =
+      checks::HealthChecker::create(
+          healthCheck,
+          launcherDir,
+          defer(self(), &Self::taskHealthUpdated, lambda::_1),
+          task.task_id(),
+          containerPid,
+          namespaces);
 
     if (_checker.isError()) {
       // TODO(gilbert): Consider ABORT and return a TASK_FAILED here.
-      cerr << "Failed to create health checker: "
-           << _checker.error() << endl;
+      LOG(ERROR) << "Failed to create health checker: "
+                 << _checker.error();
     } else {
       checker = _checker.get();
-
-      checker->healthCheck()
-        .onAny([](const Future<Nothing>& future) {
-          // Only possible to be a failure.
-          if (future.isFailed()) {
-            cerr << "Health check failed:" << future.failure() << endl;
-          }
-        });
     }
   }
 
   // TODO(alexr): Introduce a state enum and document transitions,
   // see MESOS-5252.
   bool killed;
-  bool killedByHealthCheck;
   bool terminated;
+
+  bool killedByHealthCheck;
+  bool killingInProgress; // Guard against simultaneous kill attempts.
 
   string launcherDir;
   Owned<Docker> docker;
@@ -564,6 +684,8 @@ private:
   string mappedDirectory;
   Duration shutdownGracePeriod;
   map<string, string> taskEnvironment;
+  Option<ContainerDNSInfo> defaultContainerDNS;
+  bool cgroupsEnableCfs;
 
   Option<KillPolicy> killPolicy;
   Option<Future<Option<int>>> run;
@@ -572,7 +694,7 @@ private:
   Option<ExecutorDriver*> driver;
   Option<FrameworkInfo> frameworkInfo;
   Option<TaskID> taskId;
-  Owned<health::HealthChecker> checker;
+  Owned<checks::HealthChecker> checker;
   Option<NetworkInfo> containerNetworkInfo;
   Option<pid_t> containerPid;
 };
@@ -588,7 +710,9 @@ public:
       const string& mappedDirectory,
       const Duration& shutdownGracePeriod,
       const string& launcherDir,
-      const map<string, string>& taskEnvironment)
+      const map<string, string>& taskEnvironment,
+      const Option<ContainerDNSInfo>& defaultContainerDNS,
+      bool cgroupsEnableCfs)
   {
     process = Owned<DockerExecutorProcess>(new DockerExecutorProcess(
         docker,
@@ -597,7 +721,9 @@ public:
         mappedDirectory,
         shutdownGracePeriod,
         launcherDir,
-        taskEnvironment));
+        taskEnvironment,
+        defaultContainerDNS,
+        cgroupsEnableCfs));
 
     spawn(process.get());
   }
@@ -684,45 +810,41 @@ int main(int argc, char** argv)
   // Load flags from environment and command line.
   Try<flags::Warnings> load = flags.load(None(), &argc, &argv);
 
+  if (flags.help) {
+    cout << flags.usage() << endl;
+    return EXIT_SUCCESS;
+  }
+
   if (load.isError()) {
     cerr << flags.usage(load.error()) << endl;
     return EXIT_FAILURE;
   }
 
-  std::cout << stringify(flags) << std::endl;
-
-  mesos::internal::logging::initialize(argv[0], flags, true); // Catch signals.
+  mesos::internal::logging::initialize(argv[0], true, flags); // Catch signals.
 
   // Log any flag warnings (after logging is initialized).
   foreach (const flags::Warning& warning, load->warnings) {
     LOG(WARNING) << warning.message;
   }
 
-  if (flags.help) {
-    cout << flags.usage() << endl;
-    return EXIT_SUCCESS;
-  }
-
-  std::cout << stringify(flags) << std::endl;
+  VLOG(1) << stringify(flags);
 
   if (flags.docker.isNone()) {
-    cerr << flags.usage("Missing required option --docker") << endl;
-    return EXIT_FAILURE;
+    EXIT(EXIT_FAILURE) << flags.usage("Missing required option --docker");
   }
 
   if (flags.container.isNone()) {
-    cerr << flags.usage("Missing required option --container") << endl;
-    return EXIT_FAILURE;
+    EXIT(EXIT_FAILURE) << flags.usage("Missing required option --container");
   }
 
   if (flags.sandbox_directory.isNone()) {
-    cerr << flags.usage("Missing required option --sandbox_directory") << endl;
-    return EXIT_FAILURE;
+    EXIT(EXIT_FAILURE)
+      << flags.usage("Missing required option --sandbox_directory");
   }
 
   if (flags.mapped_directory.isNone()) {
-    cerr << flags.usage("Missing required option --mapped_directory") << endl;
-    return EXIT_FAILURE;
+    EXIT(EXIT_FAILURE)
+      << flags.usage("Missing required option --mapped_directory");
   }
 
   map<string, string> taskEnvironment;
@@ -732,9 +854,8 @@ int main(int argc, char** argv)
       JSON::parse<JSON::Object>(flags.task_environment.get());
 
     if (json.isError()) {
-      cerr << flags.usage("Failed to parse --task_environment: " + json.error())
-           << endl;
-      return EXIT_FAILURE;
+      EXIT(EXIT_FAILURE)
+        << flags.usage("Failed to parse --task_environment: " + json.error());
     }
 
     // Convert from JSON to map.
@@ -743,16 +864,27 @@ int main(int argc, char** argv)
         const JSON::Value& value,
         json->values) {
       if (!value.is<JSON::String>()) {
-        cerr << flags.usage(
-            "Value of key '" + key +
-            "' in --task_environment is not a string")
-             << endl;
-        return EXIT_FAILURE;
+        EXIT(EXIT_FAILURE) << flags.usage(
+            "Value of key '" + key + "' in --task_environment is not a string");
       }
 
       // Save the parsed and validated key/value.
       taskEnvironment[key] = value.as<JSON::String>().value;
     }
+  }
+
+  Option<mesos::internal::ContainerDNSInfo> defaultContainerDNS;
+  if (flags.default_container_dns.isSome()) {
+    Try<mesos::internal::ContainerDNSInfo> parse =
+      flags::parse<mesos::internal::ContainerDNSInfo>(
+          flags.default_container_dns.get());
+
+    if (parse.isError()) {
+      EXIT(EXIT_FAILURE) << flags.usage(
+          "Failed to parse --default_container_dns: " + parse.error());
+    }
+
+    defaultContainerDNS = parse.get();
   }
 
   // Get executor shutdown grace period from the environment.
@@ -767,9 +899,9 @@ int main(int argc, char** argv)
   if (value.isSome()) {
     Try<Duration> parse = Duration::parse(value.get());
     if (parse.isError()) {
-      cerr << "Failed to parse value '" << value.get() << "'"
-           << " of 'MESOS_EXECUTOR_SHUTDOWN_GRACE_PERIOD': " << parse.error();
-      return EXIT_FAILURE;
+      EXIT(EXIT_FAILURE)
+        << "Failed to parse value '" << value.get() << "'"
+        << " of 'MESOS_EXECUTOR_SHUTDOWN_GRACE_PERIOD': " << parse.error();
     }
 
     shutdownGracePeriod = parse.get();
@@ -784,9 +916,10 @@ int main(int argc, char** argv)
   }
 
   if (flags.launcher_dir.isNone()) {
-    cerr << flags.usage("Missing required option --launcher_dir") << endl;
-    return EXIT_FAILURE;
+    EXIT(EXIT_FAILURE) << flags.usage("Missing required option --launcher_dir");
   }
+
+  process::initialize();
 
   // The 2nd argument for docker create is set to false so we skip
   // validation when creating a docker abstraction, as the slave
@@ -797,19 +930,36 @@ int main(int argc, char** argv)
       false);
 
   if (docker.isError()) {
-    cerr << "Unable to create docker abstraction: " << docker.error() << endl;
-    return EXIT_FAILURE;
+    EXIT(EXIT_FAILURE)
+      << "Unable to create docker abstraction: " << docker.error();
   }
 
-  mesos::internal::docker::DockerExecutor executor(
-      docker.get(),
-      flags.container.get(),
-      flags.sandbox_directory.get(),
-      flags.mapped_directory.get(),
-      shutdownGracePeriod,
-      flags.launcher_dir.get(),
-      taskEnvironment);
+  Owned<mesos::internal::docker::DockerExecutor> executor(
+      new mesos::internal::docker::DockerExecutor(
+          docker.get(),
+          flags.container.get(),
+          flags.sandbox_directory.get(),
+          flags.mapped_directory.get(),
+          shutdownGracePeriod,
+          flags.launcher_dir.get(),
+          taskEnvironment,
+          defaultContainerDNS,
+          flags.cgroups_enable_cfs));
 
-  mesos::MesosExecutorDriver driver(&executor);
-  return driver.run() == mesos::DRIVER_STOPPED ? EXIT_SUCCESS : EXIT_FAILURE;
+  Owned<mesos::MesosExecutorDriver> driver(
+      new mesos::MesosExecutorDriver(executor.get()));
+
+  bool success = driver->run() == mesos::DRIVER_STOPPED;
+
+  // NOTE: We need to delete the executor and driver before we call
+  // `process::finalize` because the executor/driver will try to terminate
+  // and wait on a libprocess actor in their destructor.
+  driver.reset();
+  executor.reset();
+
+  // NOTE: We need to finalize libprocess, on Windows especially,
+  // as any binary that uses the networking stack on Windows must
+  // also clean up the networking stack before exiting.
+  process::finalize(true);
+  return success ? EXIT_SUCCESS : EXIT_FAILURE;
 }

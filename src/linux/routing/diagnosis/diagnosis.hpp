@@ -60,6 +60,7 @@ struct Info
 {
   Info(int _family,
        int _state,
+       uint32_t _inode,
        const Option<uint16_t>& _sourcePort,
        const Option<uint16_t>& _destinationPort,
        const Option<net::IP>& _sourceIP,
@@ -67,6 +68,7 @@ struct Info
        const Option<struct tcp_info>& _tcpInfo)
     : family(_family),
       state(_state),
+      inode(_inode),
       sourcePort(_sourcePort),
       destinationPort(_destinationPort),
       sourceIP(_sourceIP),
@@ -75,6 +77,7 @@ struct Info
 
   int family;
   int state;
+  uint32_t inode;
 
   // sourcePort, destinationPort, sourceIP and destinationIP should
   // all be present because this version of kernel API that libnl3
@@ -93,10 +96,10 @@ struct Info
 
 
 // Return a list of socket information that matches the given protocol
-// family and socket states. 'states' can accpet multiple states using
+// family and socket states. 'states' can accept multiple states using
 // bitwise OR.
-// NOTE: 'family' is actually igored here because the older kernel
-// idiag API libnl3 uses only supports TCP and ingores this value. We
+// NOTE: 'family' is actually ignored here because the older kernel
+// idiag API libnl3 uses only supports TCP and ignores this value. We
 // keep it here to follow libnl3-idiag's suit.
 Try<std::vector<Info>> infos(int familiy, int states);
 

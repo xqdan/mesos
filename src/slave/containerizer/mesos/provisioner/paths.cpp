@@ -86,6 +86,16 @@ string getContainerDir(
 }
 
 
+string getLayersFilePath(
+    const string& provisionerDir,
+    const ContainerID& containerId)
+{
+  return path::join(
+      getContainerDir(provisionerDir, containerId),
+      LAYERS_FILE);
+}
+
+
 string getContainerRootfsDir(
     const string& provisionerDir,
     const ContainerID& containerId,
@@ -206,7 +216,13 @@ Try<hashmap<string, hashset<string>>> listContainerRootfses(
       continue;
     }
 
-    Try<list<string>> rootfses = os::ls(getRootfsesDir(backendDir));
+    string rootfsesDir = getRootfsesDir(backendDir);
+    if (!os::stat::isdir(rootfsesDir)) {
+      LOG(WARNING) << "Ignoring unexpected rootfses at: " << rootfsesDir;
+      continue;
+    }
+
+    Try<list<string>> rootfses = os::ls(rootfsesDir);
     if (rootfses.isError()) {
       return Error("Unable to list the backend directory: " + rootfses.error());
     }

@@ -21,7 +21,7 @@
 
 #include <gmock/gmock.h>
 
-#include <mesos/state/protobuf.hpp>
+#include <mesos/state/state.hpp>
 
 #include <process/future.hpp>
 #include <process/owned.hpp>
@@ -40,17 +40,18 @@ class MockRegistrar : public mesos::internal::master::Registrar
 {
 public:
   MockRegistrar(const master::Flags& flags,
-                mesos::state::protobuf::State* state,
+                mesos::state::State* state,
                 const Option<std::string>& authenticationRealm = None());
 
   virtual ~MockRegistrar();
 
   MOCK_METHOD1(
       apply,
-      process::Future<bool>(process::Owned<master::Operation> operation));
+      process::Future<bool>(
+          process::Owned<master::RegistryOperation> operation));
 
   process::Future<bool> unmocked_apply(
-      process::Owned<master::Operation> operation);
+      process::Owned<master::RegistryOperation> operation);
 };
 
 } // namespace tests {

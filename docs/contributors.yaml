@@ -75,6 +75,22 @@
   jira_user: anandmazumdar
   reviewboard_user: anandmazumdar
 
+- name: Andrei Budnik
+  affiliations:
+    - {organization: Mesosphere}
+  emails:
+    - abudnik@mesosphere.com
+  jira_user: abudnik
+  reviewboard_user: abudnik
+
+- name: Andrew Schwartzmeyer
+  affiliations:
+    - {organization: Microsoft}
+  emails:
+    - andrew@schwartzmeyer.com
+  jira_user: andschwa
+  reviewboard_user: andschwa
+
 - name: Andrey Dyatlov
   affiliations:
     - {organization: Mesosphere}
@@ -90,6 +106,15 @@
     - anindya_sinha@apple.com
   jira_user: anindya.sinha
   reviewboard_user: anisinha
+
+- name: Armand Grillet
+  affiliations:
+    - {organization: Mesosphere}
+  emails:
+    - armand.grillet@outlook.com
+    - agrillet@mesosphere.io
+  jira_user: armandgrillet
+  reviewboard_user: armandgrillet
 
 - name: Artem Harutyunyan
   affiliations:
@@ -135,6 +160,14 @@
   jira_user: benjaminhindman
   reviewboard_user: benjaminhindman
 
+- name: Benno Evers
+  affiliations:
+    - {organization: Yandex}
+  emails:
+    - bennoe@yandex-team.ru
+  jira_user: bennoe
+  reviewboard_user: bennoe
+
 - name: Bernd Mathiske
   affiliations:
     - {organization: Mesosphere}
@@ -142,6 +175,14 @@
     - bernd@mesosphere.io
   jira_user: bernd-mesos
   reviewboard_user: bernd-mesos
+
+- name: Bruce Merry
+  affiliations:
+    - {organization: SKA South Africa}
+  emails:
+    - bmerry@ska.ac.za
+  jira_user: bmerry
+  reviewboard_user: bmerry
 
 - name: Charles Allen
   affiliations:
@@ -151,6 +192,14 @@
     - charles.allen@metamarkets.com
   jira_user: drcrallen
   reviewboard_user: drcrallen
+
+- name: Chun-Hung Hsiao
+  affiliations:
+    - {organization: Mesosphere}
+  emails:
+    - chhsiao@mesosphere.io
+  jira_user: chhsia0
+  reviewboard_user: chhsia0
 
 - name: Daniel Pravat
   affiliations:
@@ -184,6 +233,22 @@
     - darroyo@us.ibm.com
   jira_user: darroyo
   reviewboard_user: darroyo
+
+- name: Dmitry Zhuk
+  affiliations:
+    - {organization: Twitter}
+  emails:
+    - dzhuk@twitter.com
+  jira_user: dzhuk
+  reviewboard_user: dzhuk
+
+- name: Eric Chung
+  affiliations:
+    - {organization: Uber}
+  emails:
+    - cinchurge@gmail.com
+  jira_user: cinchurge
+  reviewboard_user: cinchurge
 
 - name: Ezra Silvera
   affiliations:
@@ -291,6 +356,14 @@
   jira_user: jjanco
   reviewboard_user: jjanco
 
+- name: Jack Yang
+  affiliations:
+    - {organization: is-land}
+  emails:
+    - jack@is-land.com.tw
+  jira_user: jackyoh
+  reviewboard_user: jackyoh
+
 - name: Jan Schlicht
   affiliations:
     - {organization: Mesosphere}
@@ -315,6 +388,14 @@
     - guojiannan@cn.ibm.com
   jira_user: guoger
   reviewboard_user: guoger
+
+- name: Jeff Coffler
+  affiliations:
+    - {organization: Microsoft}
+  emails:
+    - jeff@taltos.com
+  jira_user: coffler
+  reviewboard_user: coffler
 
 - name: Jian Qiu
   affiliations:
@@ -350,6 +431,14 @@
     - joerg@mesosphere.io
   jira_user: js84
   reviewboard_user: joerg84
+
+- name: John Kordich
+  affiliations:
+    - {organization: Microsoft}
+  emails:
+    - johnkord@microsoft.com
+  jira_user: johnkord
+  reviewboard_user: johnkord
 
 - name: Jojy Varghese
   affiliations:
@@ -471,6 +560,14 @@
   jira_user: megha.sharma
   reviewboard_user: megha.sharma
 
+- name: Meng Zhu
+  affiliations:
+    - {organization: Mesosphere}
+  emails:
+    - mzhu@mesosphere.com
+  jira_user: mzhu
+  reviewboard_user: mzhu
+
 - name: Michael Lunoe
   affiliations:
     - {organization: Mesosphere}
@@ -484,9 +581,22 @@
     - {organization: Mesosphere}
   emails:
     - mpark@apache.org
-    - mcypark@gmail.com
   jira_user: mcypark
   reviewboard_user: mcypark
+
+- name: Miguel Bernadin
+  affiliations:
+    - {organization: Mesosphere}
+  emails:
+    - miguel.bernadin@gmail.com
+  jira_user: bernadinm
+  reviewboard_user: bernadinm
+
+- name: Nathan Jackson
+  emails:
+    - nate.ds.jackson@gmail.com
+  jira_user: csnate
+  reviewboard_user: csnate
 
 - name: Neil Conway
   affiliations:
@@ -513,7 +623,15 @@
     - zhangqxa@cn.ibm.com
   jira_user: qianzhang
   reviewboard_user: qianzhang
-  
+
+- name: Quinn Leng
+  affiliations:
+    - {organization: Mesosphere}
+  emails:
+    - qleng@mesosphere.io
+  jira_user: quinn.leng.666@gmail.com
+  reviewboard_user: quinn.leng
+
 - name: Ronald Petty
   affiliations:
     - {organization: RX-M}
@@ -524,6 +642,14 @@
   jira_user: ronald.petty
   reviewboard_user: ronald.petty
 
+- name: Ryuichi Okumura
+  affiliations:
+    - {organization: Yahoo Japan Corporation}
+  emails:
+    - okuryu@okuryu.com
+  jira_user: okuryu
+  reviewboard_user: okuryu
+
 - name: Stephen Hankinson
   affiliations:
     - {organization: Affinio Inc.}
@@ -532,6 +658,14 @@
     - stephen@affinio.com
   jira_user: shankinson
   reviewboard_user: shankinson
+
+- name: Thomas Maurice
+  affiliations:
+    - {organization: Criteo}
+  emails:
+    - thomas@maurice.fr
+    - t.maurice@criteo.com
+  reviewboard_user: tmaurice
 
 - name: Till Toenshoff
   affiliations:

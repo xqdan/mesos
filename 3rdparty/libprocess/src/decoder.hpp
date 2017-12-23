@@ -13,7 +13,11 @@
 #ifndef __DECODER_HPP__
 #define __DECODER_HPP__
 
+// `http_parser.h` defines an enum `flags` which conflicts
+// with, e.g., a namespace in stout. Rename it with a macro.
+#define flags http_parser_flags
 #include <http_parser.h>
+#undef flags
 
 #include <glog/logging.h>
 
@@ -45,6 +49,8 @@ public:
   DataDecoder()
     : failure(false), request(nullptr)
   {
+    http_parser_settings_init(&settings);
+
     settings.on_message_begin = &DataDecoder::on_message_begin;
     settings.on_url = &DataDecoder::on_url;
     settings.on_header_field = &DataDecoder::on_header_field;
@@ -203,6 +209,7 @@ private:
       http_parser_parse_url(decoder->url.data(), decoder->url.size(), 0, &url);
 
     if (parse_url != 0) {
+      decoder->failure = true;
       return parse_url;
     }
 
@@ -229,6 +236,7 @@ private:
       http::query::decode(decoder->query);
 
     if (decoded.isError()) {
+      decoder->failure = true;
       return 1;
     }
 
@@ -240,6 +248,7 @@ private:
     if (encoding.isSome() && encoding.get() == "gzip") {
       Try<std::string> decompressed = gzip::decompress(decoder->request->body);
       if (decompressed.isError()) {
+        decoder->failure = true;
         return 1;
       }
       decoder->request->body = decompressed.get();
@@ -284,6 +293,8 @@ public:
   ResponseDecoder()
     : failure(false), header(HEADER_FIELD), response(nullptr)
   {
+    http_parser_settings_init(&settings);
+
     settings.on_message_begin = &ResponseDecoder::on_message_begin;
     settings.on_url = &ResponseDecoder::on_url;
     settings.on_header_field = &ResponseDecoder::on_header_field;
@@ -431,7 +442,6 @@ private:
         http::Status::string(decoder->parser.status_code);
     } else {
       decoder->failure = true;
-
       return 1;
     }
 
@@ -496,6 +506,8 @@ public:
   StreamingResponseDecoder()
     : failure(false), header(HEADER_FIELD), response(nullptr)
   {
+    http_parser_settings_init(&settings);
+
     settings.on_message_begin =
       &StreamingResponseDecoder::on_message_begin;
     settings.on_url =
@@ -660,7 +672,6 @@ private:
         http::Status::string(decoder->parser.status_code);
     } else {
       decoder->failure = true;
-
       return 1;
     }
 
@@ -702,7 +713,12 @@ private:
   {
     StreamingResponseDecoder* decoder = (StreamingResponseDecoder*) p->data;
 
-    CHECK_SOME(decoder->writer);
+    // This can happen if the callback `on_headers_complete()` had failed
+    // earlier (e.g., due to invalid status code).
+    if (decoder->writer.isNone()) {
+      CHECK(decoder->failure);
+      return 1;
+    }
 
     http::Pipe::Writer writer = decoder->writer.get(); // Remove const.
     writer.close();
@@ -743,6 +759,8 @@ public:
   explicit StreamingRequestDecoder()
     : failure(false), header(HEADER_FIELD), request(nullptr)
   {
+    http_parser_settings_init(&settings);
+
     settings.on_message_begin =
       &StreamingRequestDecoder::on_message_begin;
     settings.on_url =
@@ -911,6 +929,7 @@ private:
       http_parser_parse_url(decoder->url.data(), decoder->url.size(), 0, &url);
 
     if (parse_url != 0) {
+      decoder->failure = true;
       return parse_url;
     }
 
@@ -937,6 +956,7 @@ private:
       http::query::decode(decoder->query);
 
     if (decoded.isError()) {
+      decoder->failure = true;
       return 1;
     }
 
@@ -978,6 +998,7 @@ private:
         decoder->decompressor->decompress(std::string(data, length));
 
       if (decompressed.isError()) {
+        decoder->failure = true;
         return 1;
       }
 
@@ -995,13 +1016,19 @@ private:
   {
     StreamingRequestDecoder* decoder = (StreamingRequestDecoder*) p->data;
 
-    CHECK_SOME(decoder->writer);
+    // This can happen if the callback `on_headers_complete()` had failed
+    // earlier (e.g., due to invalid query parameters).
+    if (decoder->writer.isNone()) {
+      CHECK(decoder->failure);
+      return 1;
+    }
 
     http::Pipe::Writer writer = decoder->writer.get(); // Remove const.
 
     if (decoder->decompressor.get() != nullptr &&
         !decoder->decompressor->finished()) {
       writer.fail("Failed to decompress body");
+      decoder->failure = true;
       return 1;
     }
 

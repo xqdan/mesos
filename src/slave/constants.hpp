@@ -18,6 +18,9 @@
 #define __SLAVE_CONSTANTS_HPP__
 
 #include <stdint.h>
+#include <vector>
+
+#include <mesos/mesos.hpp>
 
 #include <stout/bytes.hpp>
 #include <stout/duration.hpp>
@@ -30,7 +33,16 @@ namespace slave {
 // details in MESOS-1023.
 
 constexpr Duration EXECUTOR_REGISTRATION_TIMEOUT = Minutes(1);
-constexpr Duration EXECUTOR_REREGISTER_TIMEOUT = Seconds(2);
+constexpr Duration EXECUTOR_REREGISTRATION_TIMEOUT = Seconds(2);
+
+// The maximum timeout within which an executor can re-register.
+// Note that this value has to be << 'MIN_AGENT_REREGISTER_TIMEOUT'
+// declared in 'master/constants.hpp'; since agent recovery will only
+// complete after this timeout has elapsed, this ensures that the
+// agent can re-register with the master before it is marked
+// unreachable and its tasks are transitioned to TASK_UNREACHABLE or
+// TASK_LOST.
+constexpr Duration MAX_EXECUTOR_REREGISTRATION_TIMEOUT = Seconds(15);
 
 // The default amount of time to wait for the executor to
 // shut down before destroying the container.
@@ -38,6 +50,8 @@ constexpr Duration DEFAULT_EXECUTOR_SHUTDOWN_GRACE_PERIOD = Seconds(5);
 
 constexpr Duration RECOVERY_TIMEOUT = Minutes(15);
 
+// TODO(gkleiman): Move this to a different file once `TaskStatusUpdateManager`
+// uses `StatusUpdateManagerProcess`. See MESOS-8296.
 constexpr Duration STATUS_UPDATE_RETRY_INTERVAL_MIN = Seconds(10);
 constexpr Duration STATUS_UPDATE_RETRY_INTERVAL_MAX = Minutes(10);
 
@@ -92,11 +106,19 @@ constexpr double DEFAULT_EXECUTOR_CPUS = 0.1;
 // Default memory resource given to a command executor.
 constexpr Bytes DEFAULT_EXECUTOR_MEM = Megabytes(32);
 
-#ifdef WITH_NETWORK_ISOLATOR
+#ifdef ENABLE_PORT_MAPPING_ISOLATOR
 // Default number of ephemeral ports allocated to a container by the
 // network isolator.
 constexpr uint16_t DEFAULT_EPHEMERAL_PORTS_PER_CONTAINER = 1024;
 #endif
+
+// Default UNIX socket (Linux) or Named Pipe (Windows) resource that provides
+// CLI access to the Docker daemon.
+#ifdef __WINDOWS__
+constexpr char DEFAULT_DOCKER_HOST_RESOURCE[] = "//./pipe/docker_engine";
+#else
+constexpr char DEFAULT_DOCKER_HOST_RESOURCE[] = "/var/run/docker.sock";
+#endif // __WINDOWS__
 
 // Default duration that docker containers will be removed after exit.
 constexpr Duration DOCKER_REMOVE_DELAY = Hours(6);
@@ -131,6 +153,9 @@ constexpr char READONLY_HTTP_AUTHENTICATION_REALM[] = "mesos-agent-readonly";
 // Name of the agent HTTP authentication realm for read-write endpoints.
 constexpr char READWRITE_HTTP_AUTHENTICATION_REALM[] = "mesos-agent-readwrite";
 
+// Name of the agent HTTP authentication realm for HTTP executors.
+constexpr char EXECUTOR_HTTP_AUTHENTICATION_REALM[] = "mesos-agent-executor";
+
 // Default maximum storage space to be used by the fetcher cache.
 constexpr Bytes DEFAULT_FETCHER_CACHE_SIZE = Gigabytes(2);
 
@@ -138,13 +163,17 @@ constexpr Bytes DEFAULT_FETCHER_CACHE_SIZE = Gigabytes(2);
 // trigger a re-detection of the master to cause a re-registration.
 Duration DEFAULT_MASTER_PING_TIMEOUT();
 
-// Default path of the agent runtime directory. This is where runtime
-// data is stored by an agent that it needs to persist across crashes
-// (but not across reboots). This directory will be cleared on reboot.
-constexpr char DEFAULT_ROOT_RUNTIME_DIRECTORY[] = "/var/run/mesos";
-
 // Name of the executable for default executor.
+#ifdef __WINDOWS__
+constexpr char MESOS_DEFAULT_EXECUTOR[] = "mesos-default-executor.exe";
+#else
 constexpr char MESOS_DEFAULT_EXECUTOR[] = "mesos-default-executor";
+#endif // __WINDOWS__
+
+// Virtual path on which agent logs are mounted in `/files/` endpoint.
+constexpr char AGENT_LOG_VIRTUAL_PATH[] = "/slave/log";
+
+std::vector<SlaveInfo::Capability> AGENT_CAPABILITIES();
 
 } // namespace slave {
 } // namespace internal {

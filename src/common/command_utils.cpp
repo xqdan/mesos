@@ -24,6 +24,8 @@
 #include <stout/os.hpp>
 #include <stout/unreachable.hpp>
 
+#include <stout/os/constants.hpp>
+
 #include "common/command_utils.hpp"
 #include "common/status_utils.hpp"
 
@@ -46,7 +48,7 @@ static Future<string> launch(
   Try<Subprocess> s = subprocess(
       path,
       argv,
-      Subprocess::PATH("/dev/null"),
+      Subprocess::PATH(os::DEV_NULL),
       Subprocess::PIPE(),
       Subprocess::PIPE());
 
@@ -68,7 +70,7 @@ static Future<string> launch(
         Future<Option<int>>,
         Future<string>,
         Future<string>>& t) -> Future<string> {
-      Future<Option<int>> status = std::get<0>(t);
+      const Future<Option<int>>& status = std::get<0>(t);
       if (!status.isReady()) {
         return Failure(
             "Failed to get the exit status of the subprocess: " +
@@ -80,7 +82,7 @@ static Future<string> launch(
       }
 
       if (status->get() != 0) {
-        Future<string> error = std::get<2>(t);
+        const Future<string>& error = std::get<2>(t);
         if (!error.isReady()) {
             return Failure(
                 "Unexpected result from the subprocess: " +
@@ -91,7 +93,7 @@ static Future<string> launch(
         return Failure("Subprocess '" + command + "' failed: " + error.get());
       }
 
-      Future<string> output = std::get<1>(t);
+      const Future<string>& output = std::get<1>(t);
       if (!output.isReady()) {
          return Failure(
             "Failed to read stdout from '" + command + "': " +
@@ -189,7 +191,7 @@ Future<string> sha512(const Path& input)
       vector<string> tokens = strings::tokenize(output, " ");
       if (tokens.size() < 2) {
         return Failure(
-            "Failed to parse '" + output + "' from '" + cmd +  "' command");
+            "Failed to parse '" + output + "' from '" + cmd + "' command");
       }
 
       // TODO(jojy): Check the size of tokens[0].

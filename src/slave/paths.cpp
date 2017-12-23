@@ -19,6 +19,8 @@
 #include <vector>
 
 #include <mesos/mesos.hpp>
+#include <mesos/resources.hpp>
+#include <mesos/roles.hpp>
 #include <mesos/type_utils.hpp>
 
 #include <stout/check.hpp>
@@ -30,9 +32,14 @@
 #include <stout/try.hpp>
 #include <stout/unreachable.hpp>
 
+#include <glog/logging.h>
+
+#include "common/validation.hpp"
+
 #include "messages/messages.hpp"
 
 #include "slave/paths.hpp"
+#include "slave/validation.hpp"
 
 using std::list;
 using std::string;
@@ -57,12 +64,19 @@ const char TASK_INFO_FILE[] = "task.info";
 const char TASK_UPDATES_FILE[] = "task.updates";
 const char RESOURCES_INFO_FILE[] = "resources.info";
 const char RESOURCES_TARGET_FILE[] = "resources.target";
+const char RESOURCE_PROVIDER_STATE_FILE[] = "resource_provider.state";
+const char OPERATION_UPDATES_FILE[] = "operation.updates";
 
 
+const char CONTAINERS_DIR[] = "containers";
+const char CSI_DIR[] = "csi";
 const char SLAVES_DIR[] = "slaves";
 const char FRAMEWORKS_DIR[] = "frameworks";
 const char EXECUTORS_DIR[] = "executors";
-const char CONTAINERS_DIR[] = "runs";
+const char EXECUTOR_RUNS_DIR[] = "runs";
+const char RESOURCE_PROVIDER_REGISTRY[] = "resource_provider_registry";
+const char RESOURCE_PROVIDERS_DIR[] = "resource_providers";
+const char OPERATIONS_DIR[] = "operations";
 
 
 Try<ExecutorRunPath> parseExecutorRunPath(
@@ -81,7 +95,8 @@ Try<ExecutorRunPath> parseExecutorRunPath(
         "the root directory: " + rootDir);
   }
 
-  vector<string> tokens = strings::tokenize(dir.substr(rootDir.size()), "/");
+  vector<string> tokens = strings::tokenize(
+      dir.substr(rootDir.size()), stringify(os::PATH_SEPARATOR));
 
   // A complete executor run path consists of at least 8 tokens, which
   // includes the four named directories and the four IDs.
@@ -95,7 +110,7 @@ Try<ExecutorRunPath> parseExecutorRunPath(
   if (tokens[0] == SLAVES_DIR &&
       tokens[2] == FRAMEWORKS_DIR &&
       tokens[4] == EXECUTORS_DIR &&
-      tokens[6] == CONTAINERS_DIR) {
+      tokens[6] == EXECUTOR_RUNS_DIR) {
     ExecutorRunPath path;
 
     path.slaveId.set_value(tokens[1]);
@@ -128,6 +143,12 @@ string getProvisionerDir(const string& rootDir)
 }
 
 
+string getCsiRootDir(const string& workDir)
+{
+  return path::join(workDir, CSI_DIR);
+}
+
+
 string getBootIdPath(const string& rootDir)
 {
   return path::join(rootDir, BOOT_ID_FILE);
@@ -145,6 +166,21 @@ string getSlavePath(
     const SlaveID& slaveId)
 {
   return path::join(rootDir, SLAVES_DIR, stringify(slaveId));
+}
+
+
+Try<list<string>> getContainerPaths(
+    const string& rootDir)
+{
+  return fs::list(path::join(rootDir, CONTAINERS_DIR, "*"));
+}
+
+
+string getContainerPath(
+    const string& rootDir,
+    const ContainerID& containerId)
+{
+  return path::join(rootDir, CONTAINERS_DIR, stringify(containerId));
 }
 
 
@@ -240,7 +276,7 @@ Try<list<string>> getExecutorRunPaths(
 {
   return fs::list(path::join(
       getExecutorPath(rootDir, slaveId, frameworkId, executorId),
-      CONTAINERS_DIR,
+      EXECUTOR_RUNS_DIR,
       "*"));
 }
 
@@ -254,7 +290,7 @@ string getExecutorRunPath(
 {
   return path::join(
       getExecutorPath(rootDir, slaveId, frameworkId, executorId),
-      CONTAINERS_DIR,
+      EXECUTOR_RUNS_DIR,
       stringify(containerId));
 }
 
@@ -295,6 +331,20 @@ string getExecutorSentinelPath(
 }
 
 
+string getExecutorVirtualPath(
+    const FrameworkID& frameworkId,
+    const ExecutorID& executorId)
+{
+  return path::join(
+      stringify(os::PATH_SEPARATOR) + FRAMEWORKS_DIR,
+      stringify(frameworkId),
+      EXECUTORS_DIR,
+      stringify(executorId),
+      EXECUTOR_RUNS_DIR,
+      LATEST_SYMLINK);
+}
+
+
 string getExecutorLatestRunPath(
     const string& rootDir,
     const SlaveID& slaveId,
@@ -303,7 +353,7 @@ string getExecutorLatestRunPath(
 {
   return path::join(
       getExecutorPath(rootDir, slaveId, frameworkId, executorId),
-      CONTAINERS_DIR,
+      EXECUTOR_RUNS_DIR,
       LATEST_SYMLINK);
 }
 
@@ -425,6 +475,130 @@ string getTaskUpdatesPath(
 }
 
 
+string getResourceProviderRegistryPath(
+    const string& rootDir,
+    const SlaveID& slaveId)
+{
+  return path::join(
+      getSlavePath(getMetaRootDir(rootDir), slaveId),
+      RESOURCE_PROVIDER_REGISTRY);
+}
+
+
+Try<list<string>> getResourceProviderPaths(
+    const string& metaDir,
+    const SlaveID& slaveId)
+{
+  return fs::list(path::join(
+      getSlavePath(metaDir, slaveId),
+      RESOURCE_PROVIDERS_DIR,
+      "*", // Resource provider type.
+      "*", // Resource provider name.
+      "*"));
+}
+
+
+string getResourceProviderPath(
+    const string& metaDir,
+    const SlaveID& slaveId,
+    const string& resourceProviderType,
+    const string& resourceProviderName,
+    const ResourceProviderID& resourceProviderId)
+{
+  return path::join(
+      getSlavePath(metaDir, slaveId),
+      RESOURCE_PROVIDERS_DIR,
+      resourceProviderType,
+      resourceProviderName,
+      stringify(resourceProviderId));
+}
+
+
+string getResourceProviderStatePath(
+    const string& metaDir,
+    const SlaveID& slaveId,
+    const string& resourceProviderType,
+    const string& resourceProviderName,
+    const ResourceProviderID& resourceProviderId)
+{
+  return path::join(
+      getResourceProviderPath(
+          metaDir,
+          slaveId,
+          resourceProviderType,
+          resourceProviderName,
+          resourceProviderId),
+      RESOURCE_PROVIDER_STATE_FILE);
+}
+
+
+string getLatestResourceProviderPath(
+    const string& metaDir,
+    const SlaveID& slaveId,
+    const string& resourceProviderType,
+    const string& resourceProviderName)
+{
+  return path::join(
+      getSlavePath(metaDir, slaveId),
+      RESOURCE_PROVIDERS_DIR,
+      resourceProviderType,
+      resourceProviderName,
+      LATEST_SYMLINK);
+}
+
+
+Try<list<string>> getOperationPaths(
+    const string& rootDir)
+{
+  return fs::list(path::join(rootDir, OPERATIONS_DIR, "*"));
+}
+
+
+string getOperationPath(
+    const string& rootDir,
+    const id::UUID& operationUuid)
+{
+  return path::join(rootDir, OPERATIONS_DIR, operationUuid.toString());
+}
+
+
+Try<id::UUID> parseOperationPath(
+    const string& rootDir,
+    const string& dir)
+{
+  // TODO(chhsiao): Consider using `<regex>`, which requires GCC 4.9+.
+
+  // Make sure there's a separator at the end of the prefix so that we
+  // don't accidently slice off part of a directory.
+  const string prefix = path::join(rootDir, OPERATIONS_DIR, "");
+
+  if (!strings::startsWith(dir, prefix)) {
+    return Error(
+        "Directory '" + dir + "' does not fall under operations directory '" +
+        prefix + "'");
+  }
+
+  Try<id::UUID> operationUuid = id::UUID::fromString(Path(dir).basename());
+  if (operationUuid.isError()) {
+    return Error(
+        "Could not decode operation UUID from string '" +
+        Path(dir).basename() + "': " + operationUuid.error());
+  }
+
+  return operationUuid.get();
+}
+
+
+string getOperationUpdatesPath(
+    const string& rootDir,
+    const id::UUID& operationUuid)
+{
+  return path::join(
+      getOperationPath(rootDir, operationUuid),
+      OPERATION_UPDATES_FILE);
+}
+
+
 string getResourcesInfoPath(
     const string& rootDir)
 {
@@ -440,46 +614,90 @@ string getResourcesTargetPath(
 
 
 string getPersistentVolumePath(
-    const string& rootDir,
+    const string& workDir,
     const string& role,
     const string& persistenceId)
 {
-  return path::join(rootDir, "volumes", "roles", role, persistenceId);
+  // Role names might contain literal `/` if the role is part of a
+  // role hierarchy. Since `/` is not allowed in a directory name
+  // under Linux, we could either represent such sub-roles with
+  // sub-directories, or encode the `/` with some other identifier.
+  // To clearly distinguish artifacts in a volume from subroles we
+  // choose to encode `/` in role names as ` ` (literal space) as
+  // opposed to using subdirectories. Whitespace is not allowed as
+  // part of a role name. Also, practically all modern filesystems can
+  // use ` ` in filenames. There are some limitations in auxilary
+  // tooling which are not relevant here, e.g., many shell constructs
+  // require quotes around filesnames containing ` `; containers using
+  // persistent volumes would not see the ` ` as the role-related part
+  // of the path would not be part of a mapping into the container
+  // sandbox.
+  string serializableRole = strings::replace(role, "/", " ");
+
+  return path::join(
+      workDir, "volumes", "roles", serializableRole, persistenceId);
 }
 
 
 string getPersistentVolumePath(
-    const string& rootDir,
+    const string& workDir,
     const Resource& volume)
 {
-  CHECK(volume.has_role());
+  CHECK_GT(volume.reservations_size(), 0);
   CHECK(volume.has_disk());
   CHECK(volume.disk().has_persistence());
 
+  const string& role = Resources::reservationRole(volume);
+
+  // Additionally check that the role and the persistent ID are valid
+  // before using them to construct a directory path.
+  CHECK_NONE(roles::validate(role));
+  CHECK_NONE(common::validation::validateID(volume.disk().persistence().id()));
+
+
   // If no `source` is provided in `DiskInfo` volumes are mapped into
-  // the `rootDir`.
+  // the `workDir`.
   if (!volume.disk().has_source()) {
     return getPersistentVolumePath(
-        rootDir,
-        volume.role(),
+        workDir,
+        role,
         volume.disk().persistence().id());
   }
 
   // If a `source` was provided for the volume, we map it according
   // to the `type` of disk. Currently only the `PATH` and 'MOUNT'
   // types are supported.
-  if (volume.disk().source().type() == Resource::DiskInfo::Source::PATH) {
-    // For `PATH` we mount a directory inside the `root`.
-    CHECK(volume.disk().source().has_path());
-    return getPersistentVolumePath(
-        volume.disk().source().path().root(),
-        volume.role(),
-        volume.disk().persistence().id());
-  } else if (
-      volume.disk().source().type() == Resource::DiskInfo::Source::MOUNT) {
-    // For `MOUNT` we map straight onto the root of the mount.
-    CHECK(volume.disk().source().has_mount());
-    return volume.disk().source().mount().root();
+  switch (volume.disk().source().type()) {
+    case Resource::DiskInfo::Source::PATH: {
+      // For `PATH` we mount a directory inside the `root`.
+      CHECK(volume.disk().source().has_path());
+      CHECK(volume.disk().source().path().has_root());
+      string root = volume.disk().source().path().root();
+      if (!path::absolute(root)) {
+        // A relative path in `root` is relative to agent work dir.
+        root = path::join(workDir, root);
+      }
+      return getPersistentVolumePath(
+          root,
+          role,
+          volume.disk().persistence().id());
+    }
+    case Resource::DiskInfo::Source::MOUNT: {
+      // For `MOUNT` we map straight onto the root of the mount.
+      CHECK(volume.disk().source().has_mount());
+      CHECK(volume.disk().source().mount().has_root());
+      string root = volume.disk().source().mount().root();
+      if (!path::absolute(root)) {
+        // A relative path in `root` is relative to agent work dir.
+        root = path::join(workDir, root);
+      }
+      return root;
+    }
+    case Resource::DiskInfo::Source::BLOCK:
+    case Resource::DiskInfo::Source::RAW:
+    case Resource::DiskInfo::Source::UNKNOWN:
+      LOG(FATAL) << "Unsupported DiskInfo.Source.type";
+      break;
   }
 
   UNREACHABLE();
@@ -494,6 +712,14 @@ string createExecutorDirectory(
     const ContainerID& containerId,
     const Option<string>& user)
 {
+  // These IDs should be valid as they are either assigned by the
+  // master/agent or validated by the master but we do a sanity check
+  // here before using them to create a directory.
+  CHECK_NONE(common::validation::validateSlaveID(slaveId));
+  CHECK_NONE(common::validation::validateFrameworkID(frameworkId));
+  CHECK_NONE(common::validation::validateExecutorID(executorId));
+  CHECK_NONE(slave::validation::container::validateContainerId(containerId));
+
   const string directory =
     getExecutorRunPath(rootDir, slaveId, frameworkId, executorId, containerId);
 
@@ -552,6 +778,10 @@ string createSlaveDirectory(
     const string& rootDir,
     const SlaveID& slaveId)
 {
+  // `slaveId` should be valid because it's assigned by the master but
+  // we do a sanity check here before using it to create a directory.
+  CHECK_NONE(common::validation::validateSlaveID(slaveId));
+
   const string directory = getSlavePath(rootDir, slaveId);
 
   Try<Nothing> mkdir = os::mkdir(directory);
@@ -568,6 +798,48 @@ string createSlaveDirectory(
   }
 
   // Symlink the new slave directory to "latest".
+  Try<Nothing> symlink = ::fs::symlink(directory, latest);
+
+  CHECK_SOME(symlink)
+    << "Failed to symlink directory '" << directory
+    << "' to '" << latest << "'";
+
+  return directory;
+}
+
+
+string createResourceProviderDirectory(
+    const string& rootDir,
+    const SlaveID& slaveId,
+    const string& resourceProviderType,
+    const string& resourceProviderName,
+    const ResourceProviderID& resourceProviderId)
+{
+  const string directory = getResourceProviderPath(
+      rootDir,
+      slaveId,
+      resourceProviderType,
+      resourceProviderName,
+      resourceProviderId);
+
+  Try<Nothing> mkdir = os::mkdir(directory);
+
+  CHECK_SOME(mkdir)
+    << "Failed to create resource provider directory '" << directory << "'";
+
+  // Remove the previous "latest" symlink.
+  const string latest = getLatestResourceProviderPath(
+      rootDir,
+      slaveId,
+      resourceProviderType,
+      resourceProviderName);
+
+  if (os::exists(latest)) {
+    CHECK_SOME(os::rm(latest))
+      << "Failed to remove latest symlink '" << latest << "'";
+  }
+
+  // Symlink the new resource provider directory to "latest".
   Try<Nothing> symlink = ::fs::symlink(directory, latest);
 
   CHECK_SOME(symlink)

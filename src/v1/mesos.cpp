@@ -89,6 +89,56 @@ bool operator==(const Credential& left, const Credential& right)
 }
 
 
+bool operator==(const CSIPluginInfo& left, const CSIPluginInfo& right)
+{
+  // Order of containers is important.
+  if (left.containers_size() != right.containers_size()) {
+    return false;
+  }
+
+  for (int i = 0; i < left.containers_size(); i++) {
+    if (left.containers(i) != right.containers(i)) {
+      return false;
+    }
+  }
+
+  return left.type() == right.type() &&
+    left.name() == right.name();
+}
+
+
+bool operator==(
+    const CSIPluginContainerInfo& left,
+    const CSIPluginContainerInfo& right)
+{
+  // Order of services is not important.
+  if (left.services_size() != right.services_size()) {
+    return false;
+  }
+
+  vector<bool> used(right.services_size(), false);
+
+  for (int i = 0; i < left.services_size(); i++) {
+    bool found = false;
+    for (int j = 0; j < right.services_size(); j++) {
+      if (left.services(i) == right.services(j) && !used[j]) {
+        found = used[j] = true;
+        break;
+      }
+    }
+    if (!found) {
+      return false;
+    }
+  }
+
+  return left.has_command() == right.has_command() &&
+    (!left.has_command() || left.command() == right.command()) &&
+    Resources(left.resources()) == Resources(right.resources()) &&
+    left.has_container() == right.has_container() &&
+    (!left.has_container() || left.container() == right.container());
+}
+
+
 bool operator==(
     const Environment::Variable& left,
     const Environment::Variable& right)
@@ -339,7 +389,41 @@ bool operator==(const MasterInfo& left, const MasterInfo& right)
     left.port() == right.port() &&
     left.pid() == right.pid() &&
     left.hostname() == right.hostname() &&
-    left.version() == right.version();
+    left.version() == right.version() &&
+    left.domain() == right.domain();
+}
+
+
+bool operator==(
+    const ResourceProviderInfo::Storage& left,
+    const ResourceProviderInfo::Storage& right)
+{
+  return left.plugin() == right.plugin();
+}
+
+
+bool operator==(
+    const ResourceProviderInfo& left,
+    const ResourceProviderInfo& right)
+{
+  // Order of reservations is important.
+  if (left.default_reservations_size() != right.default_reservations_size()) {
+    return false;
+  }
+
+  for (int i = 0; i < left.default_reservations_size(); i++) {
+    if (left.default_reservations(i) != right.default_reservations(i)) {
+      return false;
+    }
+  }
+
+  return left.has_id() == right.has_id() &&
+    (!left.has_id() || left.id() == right.id()) &&
+    Attributes(left.attributes()) == Attributes(right.attributes()) &&
+    left.type() == right.type() &&
+    left.name() == right.name() &&
+    left.has_storage() == right.has_storage() &&
+    (!left.has_storage() || left.storage() == right.storage());
 }
 
 
@@ -357,7 +441,8 @@ bool operator==(const AgentInfo& left, const AgentInfo& right)
     Resources(left.resources()) == Resources(right.resources()) &&
     Attributes(left.attributes()) == Attributes(right.attributes()) &&
     left.id() == right.id() &&
-    left.port() == right.port();
+    left.port() == right.port() &&
+    left.domain() == right.domain();
 }
 
 
@@ -390,6 +475,43 @@ ostream& operator<<(ostream& stream, const CapabilityInfo& capabilityInfo)
 }
 
 
+ostream& operator<<(ostream& stream, const CheckStatusInfo& checkStatusInfo)
+{
+  switch (checkStatusInfo.type()) {
+    case CheckInfo::COMMAND:
+      if (checkStatusInfo.has_command()) {
+        stream << "COMMAND";
+        if (checkStatusInfo.command().has_exit_code()) {
+          stream << " exit code " << checkStatusInfo.command().exit_code();
+        }
+      }
+      break;
+    case CheckInfo::HTTP:
+      if (checkStatusInfo.has_http()) {
+        stream << "HTTP";
+        if (checkStatusInfo.http().has_status_code()) {
+          stream << " status code " << checkStatusInfo.http().status_code();
+        }
+      }
+      break;
+    case CheckInfo::TCP:
+      if (checkStatusInfo.has_tcp()) {
+        stream << "TCP";
+        if (checkStatusInfo.tcp().has_succeeded()) {
+          stream << (checkStatusInfo.tcp().succeeded() ? " connection success"
+                                                       : " connection failure");
+        }
+      }
+      break;
+    case CheckInfo::UNKNOWN:
+      stream << "UNKNOWN";
+      break;
+  }
+
+  return stream;
+}
+
+
 ostream& operator<<(ostream& stream, const ContainerID& containerId)
 {
   return stream << containerId.value();
@@ -399,6 +521,12 @@ ostream& operator<<(ostream& stream, const ContainerID& containerId)
 ostream& operator<<(ostream& stream, const ContainerInfo& containerInfo)
 {
   return stream << containerInfo.DebugString();
+}
+
+
+ostream& operator<<(ostream& stream, const DomainInfo& domainInfo)
+{
+  return stream << JSON::protobuf(domainInfo);
 }
 
 
@@ -432,9 +560,37 @@ ostream& operator<<(ostream& stream, const OfferID& offerId)
 }
 
 
+ostream& operator<<(ostream& stream, const OperationID& operationId)
+{
+  return stream << operationId.value();
+}
+
+
+ostream& operator<<(ostream& stream, const OperationState& state)
+{
+  return stream << OperationState_Name(state);
+}
+
+
 ostream& operator<<(ostream& stream, const RateLimits& limits)
 {
   return stream << limits.DebugString();
+}
+
+
+ostream& operator<<(
+    ostream& stream,
+    const ResourceProviderID& resourceProviderId)
+{
+  return stream << resourceProviderId.value();
+}
+
+
+ostream& operator<<(
+    ostream& stream,
+    const ResourceProviderInfo& resourceProviderInfo)
+{
+  return stream << JSON::protobuf(resourceProviderInfo);
 }
 
 
@@ -495,17 +651,17 @@ ostream& operator<<(ostream& stream, const TaskState& state)
 }
 
 
-ostream& operator<<(ostream& stream, const vector<TaskID>& taskIds)
+ostream& operator<<(ostream& stream, const CheckInfo::Type& type)
 {
-  stream << "[ ";
-  for (auto it = taskIds.begin(); it != taskIds.end(); ++it) {
-    if (it != taskIds.begin()) {
-      stream << ", ";
-    }
-    stream << *it;
-  }
-  stream << " ]";
-  return stream;
+  return stream << CheckInfo::Type_Name(type);
+}
+
+
+ostream& operator<<(
+    ostream& stream,
+    const CSIPluginContainerInfo::Service& service)
+{
+  return stream << CSIPluginContainerInfo::Service_Name(service);
 }
 
 
@@ -523,9 +679,25 @@ ostream& operator<<(ostream& stream, const Image::Type& imageType)
 }
 
 
-ostream& operator<<(ostream& stream, const hashmap<string, string>& map)
+ostream& operator<<(ostream& stream, const Secret::Type& secretType)
 {
-  return stream << stringify(map);
+  return stream << Secret::Type_Name(secretType);
+}
+
+
+ostream& operator<<(
+    ostream& stream,
+    const Offer::Operation::Type& operationType)
+{
+  return stream << Offer::Operation::Type_Name(operationType);
+}
+
+
+ostream& operator<<(
+    ostream& stream,
+    const Resource::DiskInfo::Source::Type& sourceType)
+{
+  return stream << Resource::DiskInfo::Source::Type_Name(sourceType);
 }
 
 } // namespace v1 {

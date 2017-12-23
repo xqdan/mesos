@@ -12,6 +12,22 @@
 
 # Makefile for stout.
 
+# Enable common (and some language specific) warnings.
+AM_CXXFLAGS = -Wall
+# Warn when a comparison is made between signed and unsigned values.
+AM_CXXFLAGS += -Wsign-compare
+# Warn about use of format functions that can produce security issues.
+AM_CXXFLAGS += -Wformat-security
+
+# We will also have much more hardened/secured binaries and libraries.
+if ENABLE_HARDENING
+# Protect many of the functions with stack guards
+# (either -fstack-protector-strong or -fstack-protector depending on compiler support).
+AM_CXXFLAGS += @STACK_PROTECTOR@
+# Produce position independent code when appropriate.
+AM_CXXFLAGS += -fPIC -fPIE
+endif
+
 AUTOMAKE_OPTIONS = foreign
 
 if STANDALONE_STOUT
@@ -34,8 +50,9 @@ include ../versions.am
 BOOST = $(BUNDLED_DIR)/boost-$(BOOST_VERSION)
 ELFIO = $(BUNDLED_DIR)/elfio-$(ELFIO_VERSION)
 GLOG = $(BUNDLED_DIR)/glog-$(GLOG_VERSION)
-GMOCK = $(BUNDLED_DIR)/gmock-$(GMOCK_VERSION)
-GTEST = $(GMOCK)/gtest
+GOOGLETEST = $(BUNDLED_DIR)/googletest-release-$(GOOGLETEST_VERSION)
+GMOCK = $(GOOGLETEST)/googlemock
+GTEST = $(GOOGLETEST)/googletest
 PROTOBUF = $(BUNDLED_DIR)/protobuf-$(PROTOBUF_VERSION)
 PICOJSON = $(BUNDLED_DIR)/picojson-$(PICOJSON_VERSION)
 
@@ -45,7 +62,7 @@ BUNDLED_DEPS = # Initialize BUNDLED_DEPS so we can add to it.
 
 # Ensure bundled software is build properly.
 %-stamp:
-	@cd $(BUNDLED_DIR) && $(MAKE) $(AM_MAKEFLAGS) $(@F)
+	@cd $(BUNDLED_DIR) && $(MAKE) $(AM_MAKEFLAGS) $(@:$(BUNDLED_DIR)/%=%)
 
 # We use "-isystem" instead of "-I" to add Boost to the include search
 # path. This disables compiler warnings inside Boost headers since we
@@ -93,9 +110,17 @@ PROTOBUF_INCLUDE_FLAGS = -I$(PROTOBUF)/src
 LIB_PROTOBUF = $(PROTOBUF)/src/libprotobuf.la
 $(LIB_PROTOBUF): $(PROTOBUF)-build-stamp
 BUNDLED_DEPS += $(PROTOBUF)-build-stamp
+PROTOC = $(PROTOBUF)/src/protoc
 else
 LIB_PROTOBUF = -lprotobuf
+PROTOC = @PROTOCOMPILER@
 endif
+
+PROTOCFLAGS = -I$(srcdir)/tests
+
+# Targets for generating C++ protocol buffer code.
+%.pb.cc %.pb.h: tests/%.proto $(BUNDLED_DEPS)
+	$(PROTOC) $(PROTOCFLAGS) --cpp_out=$(builddir) $<
 
 # Tests for stout.
 check_PROGRAMS = stout-tests
@@ -104,8 +129,10 @@ stout_tests_SOURCES =			\
   tests/adaptor_tests.cpp		\
   tests/base64_tests.cpp		\
   tests/bits_tests.cpp			\
+  tests/boundedhashmap_tests.cpp	\
   tests/bytes_tests.cpp			\
   tests/cache_tests.cpp			\
+  tests/cpp17_tests.cpp			\
   tests/duration_tests.cpp		\
   tests/dynamiclibrary_tests.cpp	\
   tests/error_tests.cpp			\
@@ -117,6 +144,7 @@ stout_tests_SOURCES =			\
   tests/ip_tests.cpp			\
   tests/json_tests.cpp			\
   tests/jsonify_tests.cpp		\
+  tests/lambda_tests.cpp		\
   tests/linkedhashmap_tests.cpp		\
   tests/mac_tests.cpp			\
   tests/main.cpp			\
@@ -125,6 +153,7 @@ stout_tests_SOURCES =			\
   tests/numify_tests.cpp		\
   tests/option_tests.cpp		\
   tests/os_tests.cpp			\
+  tests/os/copyfile_tests.cpp		\
   tests/os/env_tests.cpp		\
   tests/os/filesystem_tests.cpp		\
   tests/os/process_tests.cpp		\
@@ -136,8 +165,6 @@ stout_tests_SOURCES =			\
   tests/os/systems_tests.cpp		\
   tests/path_tests.cpp			\
   tests/protobuf_tests.cpp		\
-  tests/protobuf_tests.pb.cc		\
-  tests/protobuf_tests.pb.h		\
   tests/protobuf_tests.proto		\
   tests/recordio_tests.cpp		\
   tests/result_tests.cpp		\
@@ -146,7 +173,9 @@ stout_tests_SOURCES =			\
   tests/subcommand_tests.cpp		\
   tests/svn_tests.cpp			\
   tests/try_tests.cpp			\
+  tests/uri_tests.cpp			\
   tests/uuid_tests.cpp			\
+  tests/variant_tests.cpp		\
   tests/version_tests.cpp
 
 if OS_LINUX
@@ -184,6 +213,19 @@ if !OS_FREEBSD
 endif
 
 BUILT_SOURCES = $(BUNDLED_DEPS)
+
+PROTOBUF_TESTS_PROTOS =			\
+  protobuf_tests.pb.cc			\
+  protobuf_tests.pb.h
+
+BUILT_SOURCES +=			\
+  $(PROTOBUF_TESTS_PROTOS)
+
+nodist_stout_tests_SOURCES =		\
+  $(PROTOBUF_TESTS_PROTOS)
+
+CLEANFILES =				\
+  $(PROTOBUF_TESTS_PROTOS)
 
 # We use a check-local target for now to avoid the parallel test
 # runner that ships with newer versions of autotools.

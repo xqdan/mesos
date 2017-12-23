@@ -35,19 +35,25 @@
 #include <unistd.h>
 #include <utime.h>
 
+#include <sys/ioctl.h>
+
 #ifdef __linux__
 #include <linux/version.h>
 #include <sys/sysinfo.h>
 #endif // __linux__
 
+#include <sys/ioctl.h>
 #include <sys/utsname.h>
 #include <sys/wait.h>
 
 #include <list>
 #include <map>
+#include <mutex>
 #include <set>
 #include <string>
 #include <vector>
+
+#include <stout/synchronized.hpp>
 
 #include <stout/os/close.hpp>
 #include <stout/os/environment.hpp>
@@ -59,7 +65,6 @@
 #include <stout/os/os.hpp>
 #include <stout/os/permissions.hpp>
 #include <stout/os/read.hpp>
-#include <stout/os/realpath.hpp>
 #include <stout/os/rename.hpp>
 #include <stout/os/sendfile.hpp>
 #include <stout/os/signals.hpp>
@@ -209,8 +214,6 @@ inline Try<Nothing> mknod(
 }
 
 
-
-
 // Suspends execution for the given duration.
 inline Try<Nothing> sleep(const Duration& duration)
 {
@@ -356,21 +359,6 @@ inline Try<std::set<pid_t>> pids(Option<pid_t> group, Option<pid_t> session)
 }
 
 
-// Looks in the environment variables for the specified key and
-// returns a string representation of its value. If no environment
-// variable matching key is found, None() is returned.
-inline Option<std::string> getenv(const std::string& key)
-{
-  char* value = ::getenv(key.c_str());
-
-  if (value == nullptr) {
-    return None();
-  }
-
-  return std::string(value);
-}
-
-
 // Creates a tar 'archive' with gzip compression, of the given 'path'.
 inline Try<Nothing> tar(const std::string& path, const std::string& archive)
 {
@@ -454,19 +442,76 @@ inline Option<std::string> which(
 }
 
 
-inline std::string temp()
+inline Try<std::string> var()
 {
-  return "/tmp";
+  return "/var";
 }
 
 
-// Create pipes for interprocess communication.
-inline Try<Nothing> pipe(int pipe_fd[2])
+inline Try<Nothing> dup2(int oldFd, int newFd)
 {
-  if (::pipe(pipe_fd) == -1) {
-    return ErrnoError();
+  while (::dup2(oldFd, newFd) == -1) {
+    if (errno == EINTR) {
+      continue;
+    } else {
+      return ErrnoError();
+    }
   }
   return Nothing();
+}
+
+
+inline Try<std::string> ptsname(int master)
+{
+  // 'ptsname' is not thread safe. Therefore, we use mutex here to
+  // make this method thread safe.
+  // TODO(jieyu): Consider using ptsname_r for linux.
+  static std::mutex* mutex = new std::mutex;
+
+  synchronized (mutex) {
+    const char* slavePath = ::ptsname(master);
+    if (slavePath == nullptr) {
+      return ErrnoError();
+    }
+    return slavePath;
+  }
+}
+
+
+inline Try<Nothing> setctty(int fd)
+{
+  if (ioctl(fd, TIOCSCTTY, nullptr) == -1) {
+    return ErrnoError();
+  }
+
+  return Nothing();
+}
+
+
+// Update the window size for
+// the terminal represented by fd.
+inline Try<Nothing> setWindowSize(
+    int fd,
+    unsigned short rows,
+    unsigned short columns)
+{
+  struct winsize winsize;
+  winsize.ws_row = rows;
+  winsize.ws_col = columns;
+
+  if (ioctl(fd, TIOCSWINSZ, &winsize) != 0) {
+    return ErrnoError();
+  }
+
+  return Nothing();
+}
+
+
+// Returns a host-specific default for the `PATH` environment variable, based
+// on the configuration of the host.
+inline std::string host_default_path()
+{
+  return "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 }
 
 } // namespace os {

@@ -21,6 +21,7 @@
 #include <process/socket.hpp>
 
 #include <stout/abort.hpp>
+#include <stout/json.hpp>
 #include <stout/lambda.hpp>
 
 namespace process {
@@ -45,11 +46,23 @@ struct EventVisitor
 };
 
 
+struct EventConsumer
+{
+  virtual ~EventConsumer() {}
+  virtual void consume(MessageEvent&&) {}
+  virtual void consume(DispatchEvent&&) {}
+  virtual void consume(HttpEvent&&) {}
+  virtual void consume(ExitedEvent&&) {}
+  virtual void consume(TerminateEvent&&) {}
+};
+
+
 struct Event
 {
   virtual ~Event() {}
 
   virtual void visit(EventVisitor* visitor) const = 0;
+  virtual void consume(EventConsumer* consumer) && = 0;
 
   template <typename T>
   bool is() const
@@ -81,35 +94,48 @@ struct Event
     }
     return *result;
   }
+
+  // JSON representation for an Event.
+  operator JSON::Object() const;
 };
 
 
 struct MessageEvent : Event
 {
-  explicit MessageEvent(Message* _message)
-    : message(_message) {}
+  explicit MessageEvent(Message&& _message)
+    : message(std::move(_message)) {}
 
-  MessageEvent(const MessageEvent& that)
-    : message(that.message == nullptr ? nullptr : new Message(*that.message)) {}
+  MessageEvent(
+      const UPID& from,
+      const UPID& to,
+      const std::string& name,
+      const char* data,
+      size_t length)
+    : message{name, from, to, std::string(data, length)} {}
 
-  virtual ~MessageEvent()
-  {
-    delete message;
-  }
+  MessageEvent(
+      const UPID& from,
+      const UPID& to,
+      std::string&& name,
+      std::string&& data)
+    : message{std::move(name), from, to, std::move(data)} {}
 
-  virtual void visit(EventVisitor* visitor) const
+  MessageEvent(MessageEvent&& that) = default;
+  MessageEvent(const MessageEvent& that) = delete;
+  MessageEvent& operator=(MessageEvent&&) = default;
+  MessageEvent& operator=(const MessageEvent&) = delete;
+
+  void visit(EventVisitor* visitor) const override
   {
     visitor->visit(*this);
   }
 
-  Message* const message;
+  void consume(EventConsumer* consumer) && override
+  {
+    consumer->consume(std::move(*this));
+  }
 
-private:
-  // Keep MessageEvent not assignable even though we made it
-  // copyable.
-  // Note that we are violating the "rule of three" here but it helps
-  // keep the fields const.
-  MessageEvent& operator=(const MessageEvent&);
+  Message message;
 };
 
 
@@ -121,27 +147,31 @@ struct HttpEvent : Event
     : request(_request),
       response(_response) {}
 
+  HttpEvent(HttpEvent&&) = default;
+  HttpEvent(const HttpEvent&) = delete;
+  HttpEvent& operator=(HttpEvent&&) = default;
+  HttpEvent& operator=(const HttpEvent&) = delete;
+
   virtual ~HttpEvent()
   {
-    delete request;
-
-    // Fail the response in case it wasn't set.
-    response->set(http::InternalServerError());
-    delete response;
+    if (response) {
+      // Fail the response in case it wasn't set.
+      response->set(http::InternalServerError());
+    }
   }
 
-  virtual void visit(EventVisitor* visitor) const
+  void visit(EventVisitor* visitor) const override
   {
     visitor->visit(*this);
   }
 
-  http::Request* const request;
-  Promise<http::Response>* response;
+  void consume(EventConsumer* consumer) && override
+  {
+    consumer->consume(std::move(*this));
+  }
 
-private:
-  // Not copyable, not assignable.
-  HttpEvent(const HttpEvent&);
-  HttpEvent& operator=(const HttpEvent&);
+  std::unique_ptr<http::Request> request;
+  std::unique_ptr<Promise<http::Response>> response;
 };
 
 
@@ -149,30 +179,35 @@ struct DispatchEvent : Event
 {
   DispatchEvent(
       const UPID& _pid,
-      const std::shared_ptr<lambda::function<void(ProcessBase*)>>& _f,
+      std::unique_ptr<lambda::CallableOnce<void(ProcessBase*)>> _f,
       const Option<const std::type_info*>& _functionType)
     : pid(_pid),
-      f(_f),
+      f(std::move(_f)),
       functionType(_functionType)
   {}
 
-  virtual void visit(EventVisitor* visitor) const
+  DispatchEvent(DispatchEvent&&) = default;
+  DispatchEvent(const DispatchEvent&) = delete;
+  DispatchEvent& operator=(DispatchEvent&&) = default;
+  DispatchEvent& operator=(const DispatchEvent&) = delete;
+
+  void visit(EventVisitor* visitor) const override
   {
     visitor->visit(*this);
   }
 
+  void consume(EventConsumer* consumer) && override
+  {
+    consumer->consume(std::move(*this));
+  }
+
   // PID receiving the dispatch.
-  const UPID pid;
+  UPID pid;
 
   // Function to get invoked as a result of this dispatch event.
-  const std::shared_ptr<lambda::function<void(ProcessBase*)>> f;
+  std::unique_ptr<lambda::CallableOnce<void(ProcessBase*)>> f;
 
-  const Option<const std::type_info*> functionType;
-
-private:
-  // Not copyable, not assignable.
-  DispatchEvent(const DispatchEvent&);
-  DispatchEvent& operator=(const DispatchEvent&);
+  Option<const std::type_info*> functionType;
 };
 
 
@@ -181,38 +216,102 @@ struct ExitedEvent : Event
   explicit ExitedEvent(const UPID& _pid)
     : pid(_pid) {}
 
-  virtual void visit(EventVisitor* visitor) const
+  ExitedEvent(ExitedEvent&&) = default;
+  ExitedEvent(const ExitedEvent&) = delete;
+  ExitedEvent& operator=(ExitedEvent&&) = default;
+  ExitedEvent& operator=(const ExitedEvent&) = delete;
+
+  void visit(EventVisitor* visitor) const override
   {
     visitor->visit(*this);
   }
 
-  const UPID pid;
+  void consume(EventConsumer* consumer) && override
+  {
+    consumer->consume(std::move(*this));
+  }
 
-private:
-  // Keep ExitedEvent not assignable even though we made it copyable.
-  // Note that we are violating the "rule of three" here but it helps
-  // keep the fields const.
-  ExitedEvent& operator=(const ExitedEvent&);
+  UPID pid;
 };
 
 
 struct TerminateEvent : Event
 {
-  explicit TerminateEvent(const UPID& _from)
-    : from(_from) {}
+  TerminateEvent(const UPID& _from, bool _inject)
+    : from(_from), inject(_inject) {}
 
-  virtual void visit(EventVisitor* visitor) const
+  TerminateEvent(TerminateEvent&&) = default;
+  TerminateEvent(const TerminateEvent&) = delete;
+  TerminateEvent& operator=(TerminateEvent&&) = default;
+  TerminateEvent& operator=(const TerminateEvent&) = delete;
+
+  void visit(EventVisitor* visitor) const override
   {
     visitor->visit(*this);
   }
 
-  const UPID from;
+  void consume(EventConsumer* consumer) && override
+  {
+    consumer->consume(std::move(*this));
+  }
 
-private:
-  // Not copyable, not assignable.
-  TerminateEvent(const TerminateEvent&);
-  TerminateEvent& operator=(const TerminateEvent&);
+  UPID from;
+  bool inject;
 };
+
+
+inline Event::operator JSON::Object() const
+{
+  JSON::Object object;
+
+  struct Visitor : EventVisitor
+  {
+    explicit Visitor(JSON::Object* _object) : object(_object) {}
+
+    virtual void visit(const MessageEvent& event)
+    {
+      object->values["type"] = "MESSAGE";
+
+      const Message& message = event.message;
+
+      object->values["name"] = message.name;
+      object->values["from"] = stringify(message.from);
+      object->values["to"] = stringify(message.to);
+      object->values["body"] = message.body;
+    }
+
+    virtual void visit(const HttpEvent& event)
+    {
+      object->values["type"] = "HTTP";
+
+      const http::Request& request = *event.request;
+
+      object->values["method"] = request.method;
+      object->values["url"] = stringify(request.url);
+    }
+
+    virtual void visit(const DispatchEvent& event)
+    {
+      object->values["type"] = "DISPATCH";
+    }
+
+    virtual void visit(const ExitedEvent& event)
+    {
+      object->values["type"] = "EXITED";
+    }
+
+    virtual void visit(const TerminateEvent& event)
+    {
+      object->values["type"] = "TERMINATE";
+    }
+
+    JSON::Object* object;
+  } visitor(&object);
+
+  visit(&visitor);
+
+  return object;
+}
 
 } // namespace process {
 

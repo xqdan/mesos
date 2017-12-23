@@ -27,7 +27,7 @@
 #include <stout/some.hpp>
 #include <stout/try.hpp>
 
-// A generic macro to faciliate definitions of CHECK_*, akin to CHECK.
+// A generic macro to facilitate definitions of CHECK_*, akin to CHECK.
 // This appends the error if possible to the end of the log message,
 // so there's no need to append the error message explicitly.
 // To define a new CHECK_*, provide the name, the function that performs the
@@ -53,8 +53,56 @@
   CHECK_STATE(CHECK_ERROR, _check_error, expression)
 
 
-// Private structs/functions used for CHECK_*.
+// A private helper for CHECK_NOTNONE which is similar to the
+// CHECK_NOTNULL provided by glog.
+template <typename T>
+T&& _check_not_none(
+    const char* file,
+    int line,
+    const char* message,
+    Option<T>&& t) {
+  if (t.isNone()) {
+    google::LogMessageFatal(file, line, new std::string(message));
+  }
+  return std::move(t).get();
+}
 
+
+template <typename T>
+T& _check_not_none(
+    const char* file,
+    int line,
+    const char* message,
+    Option<T>& t) {
+  if (t.isNone()) {
+    google::LogMessageFatal(file, line, new std::string(message));
+  }
+  return t.get();
+}
+
+
+template <typename T>
+const T& _check_not_none(
+    const char* file,
+    int line,
+    const char* message,
+    const Option<T>& t) {
+  if (t.isNone()) {
+    google::LogMessageFatal(file, line, new std::string(message));
+  }
+  return t.get();
+}
+
+
+#define CHECK_NOTNONE(expression) \
+  _check_not_none( \
+      __FILE__, \
+      __LINE__, \
+      "'" #expression "' Must be SOME", \
+      (expression))
+
+
+// Private structs/functions used for CHECK_*.
 
 template <typename T>
 Option<Error> _check_some(const Option<T>& o)

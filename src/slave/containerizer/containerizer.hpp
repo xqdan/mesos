@@ -22,6 +22,8 @@
 #include <mesos/mesos.hpp>
 #include <mesos/resources.hpp>
 
+#include <mesos/secret/resolver.hpp>
+
 #include <mesos/slave/containerizer.hpp>
 
 #include <process/future.hpp>
@@ -55,12 +57,19 @@ struct SlaveState;
 class Containerizer
 {
 public:
+  enum class LaunchResult {
+    SUCCESS,
+    ALREADY_LAUNCHED,
+    NOT_SUPPORTED,
+  };
+
   // Attempts to create a containerizer as specified by 'isolation' in
   // flags.
   static Try<Containerizer*> create(
       const Flags& flags,
       bool local,
-      Fetcher* fetcher);
+      Fetcher* fetcher,
+      SecretResolver* secretResolver = nullptr);
 
   // Determine slave resources from flags, probing the system or
   // querying a delegate.
@@ -78,34 +87,17 @@ public:
   virtual process::Future<Nothing> recover(
       const Option<state::SlaveState>& state) = 0;
 
-  // Launch a containerized task/executor. Returns true if launching
-  // this TaskInfo/ExecutorInfo is supported and it has been launched,
-  // otherwise false or a failure if something went wrong.
-  virtual process::Future<bool> launch(
-      const ContainerID& containerId,
-      const Option<TaskInfo>& taskInfo,
-      const ExecutorInfo& executorInfo,
-      const std::string& directory,
-      const Option<std::string>& user,
-      const SlaveID& slaveId,
-      const std::map<std::string, std::string>& environment,
-      bool checkpoint) = 0;
-
-  // Launch a nested container.
-  // TODO(jieyu): Consider combining with the 'launch' above.
+  // Launch a container with the specified ContainerConfig.
   //
-  // TODO(gilbert): Remove the 'slaveId' once the fetcher does
-  // not rely on SlaveID.
-  virtual process::Future<bool> launch(
+  // If the ContainerID has a parent, this will attempt to launch
+  // a nested container.
+  // NOTE: For nested containers, the required `directory` field of
+  // the ContainerConfig will be determined by the containerizer.
+  virtual process::Future<LaunchResult> launch(
       const ContainerID& containerId,
-      const CommandInfo& commandInfo,
-      const Option<ContainerInfo>& containerInfo,
-      const Option<std::string>& user,
-      const SlaveID& slaveId,
-      const Option<mesos::slave::ContainerClass>& containerClass = None())
-  {
-    return process::Failure("Unsupported");
-  }
+      const mesos::slave::ContainerConfig& containerConfig,
+      const std::map<std::string, std::string>& environment,
+      const Option<std::string>& pidCheckpointPath) = 0;
 
   // Create an HTTP connection that can be used to "attach" (i.e.,
   // stream input to or stream output from) a container.
@@ -150,7 +142,33 @@ public:
   // so you should always call wait() before destroy().
   virtual process::Future<bool> destroy(const ContainerID& containerId) = 0;
 
+  // Sends a signal to a running container. Returns false when the container
+  // cannot be found. The future may be failed if an error occurs in sending
+  // the signal to the running container.
+  virtual process::Future<bool> kill(
+      const ContainerID& containerId,
+      int signal)
+  {
+    return process::Failure("Unsupported");
+  };
+
   virtual process::Future<hashset<ContainerID>> containers() = 0;
+
+  // Remove a nested container, including its sandbox and runtime directories.
+  //
+  // NOTE: You can only remove a a nested container that has been fully
+  // destroyed and whose parent has not been destroyed yet. If the parent has
+  // already been destroyed, then the sandbox and runtime directories will be
+  // eventually garbage collected. The caller is responsible for ensuring that
+  // `containerId` belongs to a nested container.
+  virtual process::Future<Nothing> remove(const ContainerID& containerId)
+  {
+    return process::Failure("Unsupported");
+  }
+
+  // Prune unused images from supported image stores.
+  virtual process::Future<Nothing> pruneImages(
+      const std::vector<Image>& excludedImages) = 0;
 };
 
 } // namespace slave {

@@ -21,6 +21,8 @@
 #include <string>
 #include <vector>
 
+#include <mesos/authentication/secret_generator.hpp>
+
 #include <mesos/authorizer/authorizer.hpp>
 
 #include <mesos/allocator/allocator.hpp>
@@ -29,6 +31,9 @@
 #include <mesos/module/authorizer.hpp>
 #include <mesos/module/contender.hpp>
 #include <mesos/module/detector.hpp>
+#include <mesos/module/secret_resolver.hpp>
+
+#include <mesos/secret/resolver.hpp>
 
 #include <mesos/slave/resource_estimator.hpp>
 
@@ -51,6 +56,10 @@
 #include <stout/try.hpp>
 #include <stout/strings.hpp>
 
+#ifdef USE_SSL_SOCKET
+#include "authentication/executor/jwt_secret_generator.hpp"
+#endif // USE_SSL_SOCKET
+
 #include "common/protobuf_utils.hpp"
 
 #include "local.hpp"
@@ -72,7 +81,7 @@
 
 #include "slave/gc.hpp"
 #include "slave/slave.hpp"
-#include "slave/status_update_manager.hpp"
+#include "slave/task_status_update_manager.hpp"
 
 #include "slave/containerizer/containerizer.hpp"
 #include "slave/containerizer/fetcher.hpp"
@@ -80,11 +89,19 @@
 using namespace mesos::internal;
 #ifndef __WINDOWS__
 using namespace mesos::internal::log;
+#endif // __WINDOWS__
 
+using mesos::SecretGenerator;
+
+#ifndef __WINDOWS__
 using mesos::log::Log;
 #endif // __WINDOWS__
 
 using mesos::allocator::Allocator;
+
+#ifdef USE_SSL_SOCKET
+using mesos::authentication::executor::JWTSecretGenerator;
+#endif // USE_SSL_SOCKET
 
 using mesos::master::contender::MasterContender;
 using mesos::master::contender::StandaloneMasterContender;
@@ -101,7 +118,7 @@ using mesos::internal::slave::Containerizer;
 using mesos::internal::slave::Fetcher;
 using mesos::internal::slave::GarbageCollector;
 using mesos::internal::slave::Slave;
-using mesos::internal::slave::StatusUpdateManager;
+using mesos::internal::slave::TaskStatusUpdateManager;
 
 using mesos::modules::Anonymous;
 using mesos::modules::ModuleManager;
@@ -140,10 +157,11 @@ static MasterContender* contender = nullptr;
 static Option<Authorizer*> authorizer_ = None();
 static Files* files = nullptr;
 static vector<GarbageCollector*>* garbageCollectors = nullptr;
-static vector<StatusUpdateManager*>* statusUpdateManagers = nullptr;
+static vector<TaskStatusUpdateManager*>* taskStatusUpdateManagers = nullptr;
 static vector<Fetcher*>* fetchers = nullptr;
 static vector<ResourceEstimator*>* resourceEstimators = nullptr;
 static vector<QoSController*>* qosControllers = nullptr;
+static vector<SecretGenerator*>* secretGenerators = nullptr;
 
 
 PID<Master> launch(const Flags& flags, Allocator* _allocator)
@@ -174,20 +192,18 @@ PID<Master> launch(const Flags& flags, Allocator* _allocator)
 
   files = new Files();
 
-  // Attempt to create the `work_dir` as a convenience.
-  Try<Nothing> mkdir = os::mkdir(flags.work_dir);
-  if (mkdir.isError()) {
-    EXIT(EXIT_FAILURE)
-      << "Failed to create the work_dir for agents/master '"
-      << flags.work_dir << "': " << mkdir.error();
-  }
-
   {
+    // Use to propagate necessary flags to master. Without this, the
+    // load call will spit out an error unless their corresponding
+    // environment variables explicitly set.
+    map<string, string> propagatedFlags;
+    propagatedFlags["work_dir"] = path::join(flags.work_dir, "master");
+
     master::Flags masterFlags;
-
-    Try<flags::Warnings> load = masterFlags.load("MESOS_");
-
-    masterFlags.work_dir = flags.work_dir;
+    Try<flags::Warnings> load = masterFlags.load(
+        propagatedFlags,
+        false,
+        "MESOS_");
 
     if (load.isError()) {
       EXIT(EXIT_FAILURE)
@@ -198,6 +214,14 @@ PID<Master> launch(const Flags& flags, Allocator* _allocator)
     // Log any flag warnings.
     foreach (const flags::Warning& warning, load->warnings) {
       LOG(WARNING) << warning.message;
+    }
+
+    // Attempt to create the `work_dir` for master as a convenience.
+    Try<Nothing> mkdir = os::mkdir(masterFlags.work_dir.get());
+    if (mkdir.isError()) {
+      EXIT(EXIT_FAILURE)
+        << "Failed to create the work_dir for master '"
+        << masterFlags.work_dir.get() << "': " << mkdir.error();
     }
 
     // Load modules. Note that this covers both, master and slave
@@ -342,19 +366,35 @@ PID<Master> launch(const Flags& flags, Allocator* _allocator)
   PID<Master> pid = process::spawn(master);
 
   garbageCollectors = new vector<GarbageCollector*>();
-  statusUpdateManagers = new vector<StatusUpdateManager*>();
+  taskStatusUpdateManagers = new vector<TaskStatusUpdateManager*>();
   fetchers = new vector<Fetcher*>();
   resourceEstimators = new vector<ResourceEstimator*>();
   qosControllers = new vector<QoSController*>();
+  secretGenerators = new vector<SecretGenerator*>();
 
   vector<UPID> pids;
 
   for (int i = 0; i < flags.num_slaves; i++) {
+    // Use to propagate necessary flags to agent. Without this, the
+    // load call will spit out an error unless their corresponding
+    // environment variables explicitly set.
+    map<string, string> propagatedFlags;
+
+    // Use a different work/runtime/fetcher-cache directory for each agent.
+    propagatedFlags["work_dir"] =
+      path::join(flags.work_dir, "agents", stringify(i), "work");
+
+    propagatedFlags["runtime_dir"] =
+      path::join(flags.work_dir, "agents", stringify(i), "run");
+
+    propagatedFlags["fetcher_cache_dir"] =
+      path::join(flags.work_dir, "agents", stringify(i), "fetch");
+
     slave::Flags slaveFlags;
-
-    Try<flags::Warnings> load = slaveFlags.load("MESOS_");
-
-    slaveFlags.work_dir = flags.work_dir;
+    Try<flags::Warnings> load = slaveFlags.load(
+        propagatedFlags,
+        false,
+        "MESOS_");
 
     if (load.isError()) {
       EXIT(EXIT_FAILURE)
@@ -367,12 +407,26 @@ PID<Master> launch(const Flags& flags, Allocator* _allocator)
       LOG(WARNING) << warning.message;
     }
 
-    // Use a different work directory for each slave.
-    slaveFlags.work_dir = path::join(slaveFlags.work_dir, stringify(i));
+    // Attempt to create the `work_dir` for agent as a convenience.
+    Try<Nothing> mkdir = os::mkdir(slaveFlags.work_dir);
+    if (mkdir.isError()) {
+      EXIT(EXIT_FAILURE)
+        << "Failed to create the work_dir for agent '"
+        << slaveFlags.work_dir << "': " << mkdir.error();
+    }
+
+    // Attempt to create the `runtime_dir` for agent as a convenience.
+    mkdir = os::mkdir(slaveFlags.runtime_dir);
+    if (mkdir.isError()) {
+      EXIT(EXIT_FAILURE)
+        << "Failed to create the runtime_dir for agent '"
+        << slaveFlags.runtime_dir << "': " << mkdir.error();
+    }
 
     garbageCollectors->push_back(new GarbageCollector());
-    statusUpdateManagers->push_back(new StatusUpdateManager(slaveFlags));
-    fetchers->push_back(new Fetcher());
+    taskStatusUpdateManagers->push_back(
+        new TaskStatusUpdateManager(slaveFlags));
+    fetchers->push_back(new Fetcher(slaveFlags));
 
     Try<ResourceEstimator*> resourceEstimator =
       ResourceEstimator::create(slaveFlags.resource_estimator);
@@ -394,6 +448,37 @@ PID<Master> launch(const Flags& flags, Allocator* _allocator)
 
     qosControllers->push_back(qosController.get());
 
+    SecretGenerator* secretGenerator = nullptr;
+
+#ifdef USE_SSL_SOCKET
+    if (slaveFlags.jwt_secret_key.isSome()) {
+      Try<string> jwtSecretKey = os::read(slaveFlags.jwt_secret_key.get());
+      if (jwtSecretKey.isError()) {
+        EXIT(EXIT_FAILURE) << "Failed to read the file specified by "
+                           << "--jwt_secret_key";
+      }
+
+      // TODO(greggomann): Factor the following code out into a common helper,
+      // since we also do this when loading credentials.
+      Try<os::Permissions> permissions =
+        os::permissions(slaveFlags.jwt_secret_key.get());
+      if (permissions.isError()) {
+        LOG(WARNING) << "Failed to stat jwt secret key file '"
+                     << slaveFlags.jwt_secret_key.get()
+                     << "': " << permissions.error();
+      } else if (permissions.get().others.rwx) {
+        LOG(WARNING) << "Permissions on executor secret key file '"
+                     << slaveFlags.jwt_secret_key.get()
+                     << "' are too open; it is recommended that your"
+                     << " key file is NOT accessible by others";
+      }
+
+      secretGenerator = new JWTSecretGenerator(jwtSecretKey.get());
+    }
+#endif // USE_SSL_SOCKET
+
+    secretGenerators->push_back(secretGenerator);
+
     // Override the default launcher that gets created per agent to
     // 'posix' if we're creating multiple agents because the
     // LinuxLauncher does not support multiple agents on the same host
@@ -406,8 +491,20 @@ PID<Master> launch(const Flags& flags, Allocator* _allocator)
       slaveFlags.launcher = "posix";
     }
 
-    Try<Containerizer*> containerizer =
-      Containerizer::create(slaveFlags, true, fetchers->back());
+    // Initialize SecretResolver.
+    Try<SecretResolver*> secretResolver =
+      mesos::SecretResolver::create(slaveFlags.secret_resolver);
+
+    if (secretResolver.isError()) {
+      EXIT(EXIT_FAILURE)
+        << "Failed to initialize secret resolver: " << secretResolver.error();
+    }
+
+    Try<Containerizer*> containerizer = Containerizer::create(
+        slaveFlags,
+        true,
+        fetchers->back(),
+        secretResolver.get());
 
     if (containerizer.isError()) {
       EXIT(EXIT_FAILURE)
@@ -423,9 +520,10 @@ PID<Master> launch(const Flags& flags, Allocator* _allocator)
         containerizer.get(),
         files,
         garbageCollectors->back(),
-        statusUpdateManagers->back(),
+        taskStatusUpdateManagers->back(),
         resourceEstimators->back(),
         qosControllers->back(),
+        secretGenerators->back(),
         authorizer_); // Same authorizer as master.
 
     slaves[containerizer.get()] = slave;
@@ -482,12 +580,14 @@ void shutdown()
     delete garbageCollectors;
     garbageCollectors = nullptr;
 
-    foreach (StatusUpdateManager* statusUpdateManager, *statusUpdateManagers) {
-      delete statusUpdateManager;
+    foreach (
+        TaskStatusUpdateManager* taskStatusUpdateManager,
+        *taskStatusUpdateManagers) {
+      delete taskStatusUpdateManager;
     }
 
-    delete statusUpdateManagers;
-    statusUpdateManagers = nullptr;
+    delete taskStatusUpdateManagers;
+    taskStatusUpdateManagers = nullptr;
 
     foreach (Fetcher* fetcher, *fetchers) {
       delete fetcher;
@@ -495,6 +595,13 @@ void shutdown()
 
     delete fetchers;
     fetchers = nullptr;
+
+    foreach (SecretGenerator* secretGenerator, *secretGenerators) {
+      delete secretGenerator;
+    }
+
+    delete secretGenerators;
+    secretGenerators = nullptr;
 
     foreach (ResourceEstimator* estimator, *resourceEstimators) {
       delete estimator;

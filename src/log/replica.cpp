@@ -33,7 +33,9 @@
 #include <stout/try.hpp>
 #include <stout/utils.hpp>
 
+#ifndef __WINDOWS__
 #include "log/leveldb.hpp"
+#endif // __WINDOWS__
 #include "log/replica.hpp"
 #include "log/storage.hpp"
 
@@ -347,6 +349,7 @@ bool ReplicaProcess::updatePromised(uint64_t promised)
   return true;
 }
 
+
 // When handling replicated log protocol requests, we handle errors in
 // three different ways:
 //
@@ -354,7 +357,7 @@ bool ReplicaProcess::updatePromised(uint64_t promised)
 //     number, we return a REJECT response.
 //  2. If we can't vote on the request because we're in the wrong
 //     state (e.g., not finished the recovery or catchup protocols),
-//     we return an IGNORE response.
+//     we return an IGNORED response.
 //  3. If we encounter an error (e.g., I/O failure) handling the
 //     request, we log the error and silently ignore the request.
 //
@@ -377,7 +380,7 @@ void ReplicaProcess::promise(const UPID& from, const PromiseRequest& request)
               << " as it is in " << status() << " status";
 
     PromiseResponse response;
-    response.set_type(PromiseResponse::IGNORE);
+    response.set_type(PromiseResponse::IGNORED);
     response.set_okay(false);
     response.set_proposal(request.proposal());
     reply(response);
@@ -410,6 +413,7 @@ void ReplicaProcess::promise(const UPID& from, const PromiseRequest& request)
       action.set_learned(true);
       action.set_type(Action::NOP);
       action.mutable_nop()->MergeFrom(Action::Nop());
+      action.mutable_nop()->set_tombstone(true);
 
       PromiseResponse response;
       response.set_type(PromiseResponse::ACCEPT);
@@ -526,7 +530,7 @@ void ReplicaProcess::write(const UPID& from, const WriteRequest& request)
               << " as it is in " << status() << " status";
 
     WriteResponse response;
-    response.set_type(WriteResponse::IGNORE);
+    response.set_type(WriteResponse::IGNORED);
     response.set_okay(false);
     response.set_proposal(request.proposal());
     response.set_position(request.position());
@@ -728,6 +732,21 @@ bool ReplicaProcess::persist(const Action& action)
 
       // And update the beginning position.
       begin = std::max(begin, action.truncate().to());
+    } else if (action.has_type() && action.type() == Action::NOP &&
+               action.nop().has_tombstone() && action.nop().tombstone()) {
+      // No longer consider truncated positions as holes (so that a
+      // coordinator doesn't try and fill them).
+      holes -= (Bound<uint64_t>::open(0),
+                Bound<uint64_t>::open(action.position()));
+
+      // No longer consider truncated positions as unlearned (so that
+      // a coordinator doesn't try and fill them).
+      unlearned -= (Bound<uint64_t>::open(0),
+                    Bound<uint64_t>::open(action.position()));
+
+      // And update the beginning position. There must exist at least
+      // 1 position (TRUNCATE) in the log after the tombstone.
+      begin = std::max(begin, action.position() + 1);
     }
   } else {
     // We just introduced an unlearned position.

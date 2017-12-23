@@ -47,6 +47,7 @@ public:
   virtual ~LinuxFilesystemIsolatorProcess();
 
   virtual bool supportsNesting();
+  virtual bool supportsStandalone();
 
   virtual process::Future<Nothing> recover(
       const std::list<mesos::slave::ContainerState>& states,
@@ -65,10 +66,6 @@ public:
 
 private:
   LinuxFilesystemIsolatorProcess(const Flags& flags);
-
-  Try<std::vector<CommandInfo>> getPreExecCommands(
-      const ContainerID& containerId,
-      const mesos::slave::ContainerConfig& containerConfig);
 
   const Flags flags;
 

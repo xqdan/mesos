@@ -17,13 +17,19 @@
 #include <process/clock.hpp>
 #include <process/future.hpp>
 #include <process/gtest.hpp>
+#include <process/owned.hpp>
 
+#include <stout/duration.hpp>
+#include <stout/nothing.hpp>
+#include <stout/stringify.hpp>
 #include <stout/try.hpp>
 
 using process::Clock;
 using process::Failure;
 using process::Future;
+using process::Owned;
 using process::Promise;
+using process::undiscardable;
 
 using std::string;
 
@@ -34,6 +40,81 @@ TEST(FutureTest, Future)
   promise.set(true);
   ASSERT_TRUE(promise.future().isReady());
   EXPECT_TRUE(promise.future().get());
+}
+
+
+TEST(FutureTest, Stringify)
+{
+  Future<bool> future;
+  EXPECT_EQ("Abandoned", stringify(future));
+
+  {
+    Owned<Promise<bool>> promise(new Promise<bool>());
+    future = promise->future();
+    promise.reset();
+    EXPECT_EQ("Abandoned", stringify(future));
+  }
+
+  {
+    Owned<Promise<bool>> promise(new Promise<bool>());
+    future = promise->future();
+    promise->future().discard();
+    promise.reset();
+    EXPECT_EQ("Abandoned (with discard)", stringify(future));
+  }
+
+  {
+    Promise<bool> promise;
+    future = promise.future();
+    EXPECT_EQ("Pending", stringify(future));
+    promise.future().discard();
+    EXPECT_EQ("Pending (with discard)", stringify(future));
+  }
+
+  {
+    Promise<bool> promise;
+    future = promise.future();
+    promise.set(true);
+    EXPECT_EQ("Ready", stringify(future));
+  }
+
+  {
+    Promise<bool> promise;
+    future = promise.future();
+    promise.future().discard();
+    promise.set(true);
+    EXPECT_EQ("Ready (with discard)", stringify(future));
+  }
+
+  {
+    Promise<bool> promise;
+    future = promise.future();
+    promise.fail("Failure");
+    EXPECT_EQ("Failed: Failure", stringify(future));
+  }
+
+  {
+    Promise<bool> promise;
+    future = promise.future();
+    promise.future().discard();
+    promise.fail("Failure");
+    EXPECT_EQ("Failed (with discard): Failure", stringify(future));
+  }
+
+  {
+    Promise<bool> promise;
+    future = promise.future();
+    promise.discard();
+    EXPECT_EQ("Discarded", stringify(future));
+  }
+
+  {
+    Promise<bool> promise;
+    future = promise.future();
+    promise.future().discard();
+    promise.discard();
+    EXPECT_EQ("Discarded (with discard)", stringify(future));
+  }
 }
 
 
@@ -126,6 +207,55 @@ TEST(FutureTest, Then)
 
   ASSERT_TRUE(future.isReady());
   EXPECT_EQ("42", future.get());
+}
+
+
+TEST(FutureTest, CallableOnce)
+{
+  Promise<Nothing> promise;
+  promise.set(Nothing());
+
+  Future<int> future = promise.future()
+    .then(lambda::partial(
+        [](std::unique_ptr<int>&& o) {
+          return *o;
+        },
+        std::unique_ptr<int>(new int(42))));
+
+  ASSERT_TRUE(future.isReady());
+  EXPECT_EQ(42, future.get());
+
+  int n = 0;
+  future = promise.future()
+    .onReady(lambda::partial(
+        [&n](std::unique_ptr<int> o) {
+          n += *o;
+        },
+        std::unique_ptr<int>(new int(1))))
+    .onAny(lambda::partial(
+        [&n](std::unique_ptr<int>&& o) {
+          n += *o;
+        },
+        std::unique_ptr<int>(new int(10))))
+    .onFailed(lambda::partial(
+        [&n](const std::unique_ptr<int>& o) {
+          n += *o;
+        },
+        std::unique_ptr<int>(new int(100))))
+    .onDiscard(lambda::partial(
+        [&n](std::unique_ptr<int>&& o) {
+          n += *o;
+        },
+        std::unique_ptr<int>(new int(1000))))
+    .onDiscarded(lambda::partial(
+        [&n](std::unique_ptr<int>&& o) {
+          n += *o;
+        },
+        std::unique_ptr<int>(new int(10000))))
+    .then([&n]() { return n; });
+
+  ASSERT_TRUE(future.isReady());
+  EXPECT_EQ(11, future.get());
 }
 
 
@@ -253,6 +383,39 @@ TEST(FutureTest, After2)
   EXPECT_FALSE(executed.load());
 
   Clock::resume();
+}
+
+
+// Verifies that a a future does not leak memory after calling
+// `after()`. This behavior occurred because a future indirectly
+// kept a reference counted pointer to itself.
+TEST(FutureTest, After3)
+{
+  Future<Nothing> future;
+  process::WeakFuture<Nothing> weak_future(future);
+
+  EXPECT_SOME(weak_future.get());
+
+  {
+    Clock::pause();
+
+    // The original future disappears here. After this call the
+    // original future goes out of scope and should not be reachable
+    // anymore.
+    future = future
+      .after(Milliseconds(1), [](Future<Nothing> f) {
+        f.discard();
+        return Nothing();
+      });
+
+    Clock::advance(Milliseconds(1));
+    Clock::settle();
+
+    AWAIT_READY(future);
+  }
+
+  EXPECT_NONE(weak_future.get());
+  EXPECT_FALSE(future.hasDiscard());
 }
 
 
@@ -458,11 +621,8 @@ TEST(FutureTest, Discard3)
 }
 
 
-// GTEST_IS_THREADSAFE is not defined on Windows. See MESOS-5903.
-TEST_TEMP_DISABLED_ON_WINDOWS(FutureTest, Select)
+TEST(FutureTest, THREADSAFE_Select)
 {
-  ASSERT_TRUE(GTEST_IS_THREADSAFE);
-
   Promise<int> promise1;
   Promise<int> promise2;
   Promise<int> promise3;
@@ -508,8 +668,208 @@ TEST(FutureTest, FromTry)
 }
 
 
+TEST(FutureTest, FromTryFuture)
+{
+  Try<Future<int>> t = 1;
+  Future<int> future = t;
+
+  ASSERT_TRUE(future.isReady());
+  EXPECT_EQ(1, future.get());
+
+  Promise<int> p;
+  t = p.future();
+  future = t;
+
+  ASSERT_TRUE(future.isPending());
+  p.set(1);
+  ASSERT_TRUE(future.isReady());
+  EXPECT_EQ(1, future.get());
+
+  t = Error("error");
+  future = t;
+
+  ASSERT_TRUE(future.isFailed());
+  EXPECT_EQ(t.error(), future.failure());
+}
+
+
 TEST(FutureTest, ArrowOperator)
 {
   Future<string> s = string("hello");
   EXPECT_EQ(5u, s->size());
+}
+
+
+TEST(FutureTest, UndiscardableFuture)
+{
+  Promise<int> promise;
+
+  Future<int> f = undiscardable(promise.future());
+
+  f.discard();
+
+  EXPECT_TRUE(f.hasDiscard());
+  EXPECT_FALSE(promise.future().hasDiscard());
+
+  promise.set(42);
+
+  AWAIT_ASSERT_EQ(42, f);
+}
+
+
+TEST(FutureTest, UndiscardableLambda)
+{
+  Promise<int> promise;
+
+  Future<int> f = Future<int>(2)
+    .then(undiscardable([&](int multiplier) {
+      return promise.future()
+        .then([=](int i) {
+          return i * multiplier;
+        });
+    }));
+
+  f.discard();
+
+  EXPECT_TRUE(f.hasDiscard());
+  EXPECT_FALSE(promise.future().hasDiscard());
+
+  promise.set(42);
+
+  AWAIT_ASSERT_EQ(84, f);
+}
+
+
+TEST(FutureTest, Abandoned)
+{
+  AWAIT_EXPECT_ABANDONED(Future<int>());
+
+  Owned<Promise<int>> promise(new Promise<int>());
+
+  Future<int> future = promise->future();
+
+  EXPECT_TRUE(!future.isAbandoned());
+
+  promise.reset();
+
+  AWAIT_EXPECT_ABANDONED(future);
+}
+
+
+TEST(FutureTest, AbandonedChain)
+{
+  Owned<Promise<int>> promise(new Promise<int>());
+
+  Future<string> future = promise->future()
+    .then([]() {
+      return Nothing();
+    })
+    .then([]() -> string {
+      return "hello world";
+    });
+
+  promise.reset();
+
+  AWAIT_EXPECT_ABANDONED(future);
+}
+
+
+TEST(FutureTest, RecoverDiscarded)
+{
+  Promise<int> promise;
+
+  Future<string> future = promise.future()
+    .then([]() -> string {
+      return "hello";
+    })
+    .recover([](const Future<string>&) -> string {
+      return "world";
+    });
+
+  promise.discard();
+
+  AWAIT_EQ("world", future);
+}
+
+
+TEST(FutureTest, RecoverFailed)
+{
+  Promise<int> promise;
+
+  Future<string> future = promise.future()
+    .then([]() -> string {
+      return "hello";
+    })
+    .recover([](const Future<string>&) -> string {
+      return "world";
+    });
+
+  promise.fail("Failure");
+
+  AWAIT_EQ("world", future);
+}
+
+
+TEST(FutureTest, RecoverAbandoned)
+{
+  Owned<Promise<int>> promise(new Promise<int>());
+
+  Future<string> future = promise->future()
+    .then([]() -> string {
+      return "hello";
+    })
+    .recover([](const Future<string>&) -> string {
+      return "world";
+    });
+
+  promise.reset();
+
+  AWAIT_EQ("world", future);
+}
+
+
+// Tests that we don't propagate a discard through a `recover()` but a
+// discard can still be called and propagate later.
+TEST(FutureTest, RecoverDiscard)
+{
+  Promise<int> promise1;
+  Promise<string> promise2;
+  Promise<string> promise3;
+  Promise<string> promise4;
+
+  Future<string> future = promise1.future()
+    .then([]() -> string {
+      return "hello";
+    })
+    .recover([&](const Future<string>&) {
+      return promise2.future()
+        .then([&]() {
+          return promise3.future()
+            .then([&]() {
+              return promise4.future();
+            });
+        });
+    });
+
+  future.discard();
+
+  promise1.discard();
+
+  EXPECT_FALSE(promise2.future().hasDiscard());
+
+  promise2.set(string("not world"));
+
+  EXPECT_FALSE(promise3.future().hasDiscard());
+
+  promise3.set(string("also not world"));
+
+  EXPECT_FALSE(promise4.future().hasDiscard());
+
+  future.discard();
+
+  EXPECT_TRUE(promise4.future().hasDiscard());
+
+  promise4.set(string("world"));
+
+  AWAIT_EQ("world", future);
 }

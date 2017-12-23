@@ -15,8 +15,10 @@
 // limitations under the License.
 
 #include <string>
+#include <vector>
 
 #include <process/owned.hpp>
+#include <process/subprocess.hpp>
 
 #include <stout/json.hpp>
 #include <stout/net.hpp>
@@ -26,9 +28,14 @@
 #include <stout/protobuf.hpp>
 #include <stout/strings.hpp>
 
+#include <stout/os/constants.hpp>
+#include <stout/os/copyfile.hpp>
+
 #include <mesos/mesos.hpp>
 
 #include <mesos/fetcher/fetcher.hpp>
+
+#include "common/status_utils.hpp"
 
 #include "hdfs/hdfs.hpp"
 
@@ -45,6 +52,7 @@ using namespace mesos;
 using namespace mesos::internal;
 
 using std::string;
+using std::vector;
 
 using mesos::fetcher::FetcherInfo;
 
@@ -59,7 +67,12 @@ static Try<bool> extract(
     const string& sourcePath,
     const string& destinationDirectory)
 {
-  string command;
+  Try<Nothing> result = Nothing();
+
+  Option<Subprocess::IO> in = None();
+  Option<Subprocess::IO> out = None();
+  vector<string> command;
+
   // Extract any .tar, .tgz, tar.gz, tar.bz2 or zip files.
   if (strings::endsWith(sourcePath, ".tar") ||
       strings::endsWith(sourcePath, ".tgz") ||
@@ -68,25 +81,54 @@ static Try<bool> extract(
       strings::endsWith(sourcePath, ".tar.bz2") ||
       strings::endsWith(sourcePath, ".txz") ||
       strings::endsWith(sourcePath, ".tar.xz")) {
-    command = "tar -C '" + destinationDirectory + "' -xf";
+    command = {"tar", "-C", destinationDirectory, "-xf", sourcePath};
   } else if (strings::endsWith(sourcePath, ".gz")) {
     string pathWithoutExtension = sourcePath.substr(0, sourcePath.length() - 3);
     string filename = Path(pathWithoutExtension).basename();
-    command = "gzip -dc > '" + destinationDirectory + "/" + filename + "' <";
+    string destinationPath = path::join(destinationDirectory, filename);
+
+    command = {"gunzip", "-d", "-c"};
+    in = Subprocess::PATH(sourcePath);
+    out = Subprocess::PATH(destinationPath);
   } else if (strings::endsWith(sourcePath, ".zip")) {
-    command = "unzip -o -d '" + destinationDirectory + "'";
+#ifdef __WINDOWS__
+    command = {"powershell",
+               "-NoProfile",
+               "-Command",
+               "Expand-Archive",
+               "-Force",
+               sourcePath,
+               destinationDirectory};
+#else
+    command = {"unzip", "-o", "-d", destinationDirectory, sourcePath};
+#endif // __WINDOWS__
   } else {
     return false;
   }
 
-  command += " '" + sourcePath + "'";
+  CHECK_GT(command.size(), 0u);
 
-  LOG(INFO) << "Extracting with command: " << command;
+  Try<Subprocess> extractProcess = subprocess(
+      command[0],
+      command,
+      in.getOrElse(Subprocess::PATH(os::DEV_NULL)),
+      out.getOrElse(Subprocess::FD(STDOUT_FILENO)),
+      Subprocess::FD(STDERR_FILENO));
 
-  int status = os::system(command);
-  if (status != 0) {
-    return Error("Failed to extract: command " + command +
-                 " exited with status: " + stringify(status));
+  if (extractProcess.isError()) {
+    return Error(
+        "Failed to extract '" + sourcePath + "': '" +
+        strings::join(" ", command) + "' failed: " +
+        extractProcess.error());
+  }
+
+  // `status()` never fails or gets discarded.
+  int status = extractProcess->status()->get();
+  if (!WSUCCEEDED(status)) {
+    return Error(
+        "Failed to extract '" + sourcePath + "': '" +
+        strings::join(" ", command) + "' failed: " +
+        WSTRINGIFY(status));
   }
 
   LOG(INFO) << "Extracted '" << sourcePath << "' into '"
@@ -158,18 +200,14 @@ static Try<string> downloadWithNet(
 }
 
 
+// TODO(coffler): Refactor code to eliminate redundant function.
 static Try<string> copyFile(
-    const string& sourcePath,
-    const string& destinationPath)
+    const string& sourcePath, const string& destinationPath)
 {
-  const string command = "cp '" + sourcePath + "' '" + destinationPath + "'";
+  const Try<Nothing> result = os::copyfile(sourcePath, destinationPath);
 
-  LOG(INFO) << "Copying resource with command:" << command;
-
-  int status = os::system(command);
-  if (status != 0) {
-    return Error("Failed to copy with command '" + command +
-                 "', exit status: " + stringify(status));
+  if (result.isError()) {
+    return Error(result.error());
   }
 
   return destinationPath;
@@ -192,7 +230,7 @@ static Try<string> download(
   }
 
   // 1. Try to fetch using a local copy.
-  // We regard as local: "file://" or the absense of any URI scheme.
+  // We regard as local: "file://" or the absence of any URI scheme.
   Result<string> sourcePath =
     Fetcher::uriToLocalPath(sourceUri, frameworksHome);
 
@@ -229,12 +267,15 @@ static Try<string> download(
 // so that someone can do: os::chmod(path, EXECUTABLE_CHMOD_FLAGS).
 static Try<string> chmodExecutable(const string& filePath)
 {
+  // TODO(coffler): Fix Windows chmod handling, see MESOS-3176.
+#ifndef __WINDOWS__
   Try<Nothing> chmod = os::chmod(
       filePath, S_IRWXU | S_IRGRP | S_IXGRP | S_IROTH | S_IXOTH);
   if (chmod.isError()) {
     return Error("Failed to chmod executable '" +
                  filePath + "': " + chmod.error());
   }
+#endif // __WINDOWS__
 
   return filePath;
 }
@@ -444,6 +485,9 @@ static Try<Nothing> createCacheDirectory(const FetcherInfo& fetcherInfo)
       if (fetcherInfo.has_user()) {
         // Fetching is performed as the task's user,
         // so chown the cache directory.
+
+        // TODO(coffler): Fix Windows chown handling, see MESOS-8063.
+#ifndef __WINDOWS__
         Try<Nothing> chown = os::chown(
             fetcherInfo.user(),
             fetcherInfo.cache_directory(),
@@ -452,6 +496,7 @@ static Try<Nothing> createCacheDirectory(const FetcherInfo& fetcherInfo)
         if (chown.isError()) {
           return chown;
         }
+#endif // __WINDOWS__
       }
 
       break;
@@ -482,9 +527,17 @@ int main(int argc, char* argv[])
 
   Try<flags::Warnings> load = flags.load("MESOS_", argc, argv);
 
-  CHECK_SOME(load) << "Could not load flags: " << load.error();
+  if (flags.help) {
+    std::cout << flags.usage() << std::endl;
+    return EXIT_SUCCESS;
+  }
 
-  logging::initialize(argv[0], flags, true); // Catch signals.
+  if (load.isError()) {
+    std::cerr << flags.usage(load.error()) << std::endl;
+    return EXIT_FAILURE;
+  }
+
+  logging::initialize(argv[0], true, flags); // Catch signals.
 
   // Log any flag warnings (after logging is initialized).
   foreach (const flags::Warning& warning, load->warnings) {
@@ -518,12 +571,15 @@ int main(int argc, char* argv[])
   // If the `FetcherInfo` specifies a user, use `os::su()` to fetch files as the
   // task's user to ensure that filesystem permissions are enforced.
   if (fetcherInfo.get().has_user()) {
+    // TODO(coffler): No support for os::su on Windows, see MESOS-8063
+#ifndef __WINDOWS__
     result = os::su(fetcherInfo.get().user());
     if (result.isError()) {
       EXIT(EXIT_FAILURE)
         << "Fetcher could not execute `os::su()` for user '"
         << fetcherInfo.get().user() << "'";
     }
+#endif // __WINDOWS__
   }
 
   const Option<string> cacheDirectory =
@@ -548,6 +604,9 @@ int main(int argc, char* argv[])
                 << "' to '" << fetched.get() << "'";
     }
   }
+
+  LOG(INFO) << "Successfully fetched all URIs into "
+            << "'" << sandboxDirectory << "'";
 
   return 0;
 }

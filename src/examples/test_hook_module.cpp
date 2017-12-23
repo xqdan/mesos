@@ -187,18 +187,21 @@ public:
   }
 
 
-  // In this hook, look for the existence of a specific label.
-  // If found, return a `Failure`.
-  // Otherwise, add an environment variable to the task.
-  virtual Future<Option<Environment>> slavePreLaunchDockerEnvironmentDecorator(
-      const Option<TaskInfo>& taskInfo,
-      const ExecutorInfo& executorInfo,
-      const string& name,
-      const string& sandboxDirectory,
-      const string& mappedDirectory,
-      const Option<map<string, string>>& env)
+  // In this hook, we check for the presence of a label, and if set
+  // we return a failure, effectively failing the container creation.
+  // Otherwise we add an environment variable to the executor and task.
+  // Additionally, this hook creates a file named "foo" in the container
+  // work directory (sandbox).
+  virtual Future<Option<DockerTaskExecutorPrepareInfo>>
+    slavePreLaunchDockerTaskExecutorDecorator(
+        const Option<TaskInfo>& taskInfo,
+        const ExecutorInfo& executorInfo,
+        const string& containerName,
+        const string& containerWorkDirectory,
+        const string& mappedSandboxDirectory,
+        const Option<map<string, string>>& env)
   {
-    LOG(INFO) << "Executing 'slavePreLaunchDockerEnvironmentDecorator' hook";
+    LOG(INFO) << "Executing 'slavePreLaunchDockerTaskExecutorDecorator' hook";
 
     if (taskInfo.isSome()) {
       foreach (const Label& label, taskInfo->labels().labels()) {
@@ -208,28 +211,23 @@ public:
       }
     }
 
-    Environment environment;
-    Environment::Variable* variable = environment.add_variables();
-    variable->set_name("FOO_DOCKER");
-    variable->set_value("docker_bar");
+    DockerTaskExecutorPrepareInfo prepareInfo;
 
-    return environment;
-  }
+    Environment* taskEnvironment =
+      prepareInfo.mutable_taskenvironment();
+    Environment::Variable* variable = taskEnvironment->add_variables();
+    variable->set_name("HOOKTEST_TASK");
+    variable->set_value("foo");
 
+    Environment* executorEnvironment =
+      prepareInfo.mutable_executorenvironment();
+    variable = executorEnvironment->add_variables();
+    variable->set_name("HOOKTEST_EXECUTOR");
+    variable->set_value("bar");
 
-  virtual Try<Nothing> slavePreLaunchDockerHook(
-      const ContainerInfo& containerInfo,
-      const CommandInfo& commandInfo,
-      const Option<TaskInfo>& taskInfo,
-      const ExecutorInfo& executorInfo,
-      const string& name,
-      const string& sandboxDirectory,
-      const string& mappedDirectory,
-      const Option<Resources>& resources,
-      const Option<map<string, string>>& env)
-  {
-    LOG(INFO) << "Executing 'slavePreLaunchDockerHook'";
-    return os::touch(path::join(sandboxDirectory, "foo"));
+    os::touch(path::join(containerWorkDirectory, "foo"));
+
+    return prepareInfo;
   }
 
 

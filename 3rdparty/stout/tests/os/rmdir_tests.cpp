@@ -238,6 +238,13 @@ TEST_F(RmdirTest, FailToRemoveNestedInvalidPath)
 // exist on Windows.
 TEST_F(RmdirTest, RemoveDirectoryWithDeviceFile)
 {
+#ifdef __FreeBSD__
+  // If we're in a jail on FreeBSD, we can't use mknod.
+  if (isJailed()) {
+      return;
+  }
+#endif
+
   // mknod requires root permission.
   Result<string> user = os::user();
   ASSERT_SOME(user);
@@ -273,12 +280,9 @@ TEST_F(RmdirTest, RemoveDirectoryWithDeviceFile)
 #endif // __WINDOWS__
 
 
-// TODO(hausdorff): Look into enabling this test on Windows. Currently it is
-// not possible to create a symlink on Windows unless the target exists. See
-// MESOS-5881.
 // This test verifies that `rmdir` can remove a directory with a
 // symlink that has no target.
-TEST_F_TEMP_DISABLED_ON_WINDOWS(RmdirTest, RemoveDirectoryNoTargetSymbolicLink)
+TEST_F(RmdirTest, SYMLINK_RmDirNoTargetSymbolicLink)
 {
   const string newDirectory = path::join(os::getcwd(), "newDirectory");
   ASSERT_SOME(os::mkdir(newDirectory));
@@ -292,9 +296,29 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(RmdirTest, RemoveDirectoryNoTargetSymbolicLink)
 }
 
 
+// This test verifies that `rmdir` can remove a directory with a
+// "hanging" symlink whose target has been deleted.
+TEST_F(RmdirTest, SYMLINK_RemoveDirectoryHangingSymlink)
+{
+  const string newDirectory = path::join(os::getcwd(), "newDirectory");
+  ASSERT_SOME(os::mkdir(newDirectory));
+
+  const string link = path::join(newDirectory, "link");
+
+  // Create a hanging symlink to a directory.
+  ASSERT_SOME(os::mkdir("tmp"));
+  ASSERT_SOME(fs::symlink("tmp", link));
+  ASSERT_SOME(os::rmdir("tmp"));
+
+  // Remove the parent directory to exercise the recursive deletion path of
+  // `os::rmdir`.
+  EXPECT_SOME(os::rmdir(newDirectory));
+}
+
+
 // This test verifies that `rmdir` will only remove the symbolic link and not
 // the target directory.
-TEST_F(RmdirTest, RemoveDirectoryWithSymbolicLinkTargetDirectory)
+TEST_F(RmdirTest, SYMLINK_RemoveDirectoryWithSymbolicLinkTargetDirectory)
 {
   const string newDirectory = path::join(os::getcwd(), "newDirectory");
   ASSERT_SOME(os::mkdir(newDirectory));
@@ -317,7 +341,7 @@ TEST_F(RmdirTest, RemoveDirectoryWithSymbolicLinkTargetDirectory)
 
 // This test verifies that `rmdir` will only remove the symbolic link and not
 // the target file.
-TEST_F(RmdirTest, RemoveDirectoryWithSymbolicLinkTargetFile)
+TEST_F(RmdirTest, SYMLINK_RemoveDirectoryWithSymbolicLinkTargetFile)
 {
   const string newDirectory = path::join(os::getcwd(), "newDirectory");
   ASSERT_SOME(os::mkdir(newDirectory));
@@ -428,7 +452,7 @@ TEST_F(RmdirContinueOnErrorTest, RemoveWithContinueOnError)
   EXPECT_TRUE(os::exists(regularFile));
 
   // Run rmdir with `continueOnError = true`.
-  ASSERT_SOME(os::rmdir(directory, true, true, true));
+  ASSERT_ERROR(os::rmdir(directory, true, true, true));
 
   EXPECT_TRUE(os::exists(directory));
   EXPECT_TRUE(os::exists(mountPoint_));

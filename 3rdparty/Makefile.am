@@ -37,17 +37,27 @@ CONFIGURE_ARGS = @CONFIGURE_ARGS@ --enable-shared=no --with-pic --srcdir=.
 #   `make install DESTDIR=${MESOS-PREFIX}/lib/mesos/3rdparty install`
 CONFIGURE_ARGS += --prefix=/
 
+# Set up building flags for non-bundled libraries.
+SSL_INCLUDE_FLAGS = @SSL_CPPFLAGS@
+SSL_LINKER_FLAGS = @SSL_LINKERFLAGS@
+ZLIB_INCLUDE_FLAGS = @ZLIB_CPPFLAGS@
+ZLIB_LINKER_FLAGS = @ZLIB_LINKERFLAGS@
+
 # Directory where bundled 3rdparty module dependencies are installed.
 pkg3rdpartydir = $(pkglibdir)/3rdparty
 
 include versions.am
 
 BOOST = boost-$(BOOST_VERSION)
+CONCURRENTQUEUE = concurrentqueue-$(CONCURRENTQUEUE_VERSION)
+CSI = csi-$(CSI_VERSION)
 ELFIO = elfio-$(ELFIO_VERSION)
 GLOG = glog-$(GLOG_VERSION)
-GMOCK = gmock-$(GMOCK_VERSION)
+GOOGLETEST = googletest-release-$(GOOGLETEST_VERSION)
+GMOCK = $(GOOGLETEST)/googlemock
 GPERFTOOLS = gperftools-$(GPERFTOOLS_VERSION)
-GTEST = $(GMOCK)/gtest
+GRPC = grpc-$(GRPC_VERSION)
+GTEST = $(GOOGLETEST)/googletest
 HTTP_PARSER = http-parser-$(HTTP_PARSER_VERSION)
 LEVELDB = leveldb-$(LEVELDB_VERSION)
 LIBEV = libev-$(LIBEV_VERSION)
@@ -59,21 +69,24 @@ SETUPTOOLS = setuptools-$(SETUPTOOLS_VERSION)
 WHEEL = wheel-$(WHEEL_VERSION)
 ZOOKEEPER = zookeeper-$(ZOOKEEPER_VERSION)
 
-EXTRA_DIST =		\
-  $(BOOST).tar.gz	\
-  $(ELFIO).tar.gz	\
-  $(GLOG).tar.gz	\
-  $(GMOCK).tar.gz	\
-  $(GPERFTOOLS).tar.gz	\
-  $(HTTP_PARSER).tar.gz	\
-  $(LEVELDB).tar.gz	\
-  $(LIBEV).tar.gz	\
-  $(NVML).tar.gz	\
-  $(PIP).tar.gz		\
-  $(PROTOBUF).tar.gz	\
-  $(PICOJSON).tar.gz	\
-  $(SETUPTOOLS).tar.gz	\
-  $(WHEEL).tar.gz	\
+EXTRA_DIST =			\
+  $(BOOST).tar.gz		\
+  $(CONCURRENTQUEUE).tar.gz	\
+  $(CSI).tar.gz			\
+  $(ELFIO).tar.gz		\
+  $(GLOG).tar.gz		\
+  $(GOOGLETEST).tar.gz		\
+  $(GPERFTOOLS).tar.gz		\
+  $(GRPC).tar.gz		\
+  $(HTTP_PARSER).tar.gz		\
+  $(LEVELDB).tar.gz		\
+  $(LIBEV).tar.gz		\
+  $(NVML).tar.gz		\
+  $(PIP).tar.gz			\
+  $(PROTOBUF).tar.gz		\
+  $(PICOJSON).tar.gz		\
+  $(SETUPTOOLS).tar.gz		\
+  $(WHEEL).tar.gz		\
   $(ZOOKEEPER).tar.gz
 
 # We need to patch glog in order to deal with a compilation issue when
@@ -81,9 +94,9 @@ EXTRA_DIST =		\
 EXTRA_DIST +=		\
   $(GLOG).patch
 
-# We patch http-parser to avoid a name collision with our `flags` namespace.
+# We patch grpc for compilation issues. See `grpc-1.4.2.readme`.
 EXTRA_DIST +=		\
-  $(HTTP_PARSER).patch
+  $(GRPC).patch
 
 # We need to patch leveldb to prevent it from linking to snappy and
 # tcmalloc; see MESOS-1054, MESOS-1624.
@@ -94,30 +107,28 @@ EXTRA_DIST +=		\
 EXTRA_DIST +=		\
   $(LIBEV).patch
 
-# We include an upstream patch for protobuf in order to avoid
-# signed/unsigned comparisons.
-EXTRA_DIST +=		\
-  $(PROTOBUF).patch
-
 # We need to patch ZooKeeper in order to get 3.4.8 to compile on PPC LE.
 EXTRA_DIST +=		\
   $(ZOOKEEPER).patch
 
-CLEAN_EXTRACTED =	\
-  $(BOOST)		\
-  $(ELFIO)		\
-  $(GLOG)		\
-  $(GMOCK)		\
-  $(GPERFTOOLS)		\
-  $(HTTP_PARSER)	\
-  $(LEVELDB)		\
-  $(LIBEV)		\
-  $(NVML)		\
-  $(PIP)		\
-  $(PICOJSON)		\
-  $(PROTOBUF)		\
-  $(SETUPTOOLS)		\
-  $(WHEEL)		\
+CLEAN_EXTRACTED =		\
+  $(BOOST)			\
+  $(CONCURRENTQUEUE)		\
+  $(CSI)			\
+  $(ELFIO)			\
+  $(GLOG)			\
+  $(GOOGLETEST)			\
+  $(GPERFTOOLS)			\
+  $(GRPC)			\
+  $(HTTP_PARSER)		\
+  $(LEVELDB)			\
+  $(LIBEV)			\
+  $(NVML)			\
+  $(PIP)			\
+  $(PICOJSON)			\
+  $(PROTOBUF)			\
+  $(SETUPTOOLS)			\
+  $(WHEEL)			\
   $(ZOOKEEPER)
 
 # This is where the magic happens: we use stamp files as dependencies
@@ -147,6 +158,14 @@ endif
 
 if WITH_BUNDLED_BOOST
   ALL_LOCAL += $(BOOST)-stamp
+endif
+
+if WITH_BUNDLED_CONCURRENTQUEUE
+# Libprocess depends on <concurrentqueue.h>. Install concurrentqeueue.h
+# into $PREFIX/include but don't add it to the source tarball.
+nodist_include_HEADERS = $(CONCURRENTQUEUE)/concurrentqueue.h
+$(CONCURRENTQUEUE)/concurrentqueue.h: $(CONCURRENTQUEUE)-stamp
+ALL_LOCAL += $(CONCURRENTQUEUE)-stamp
 endif
 
 if WITH_BUNDLED_ELFIO
@@ -197,9 +216,11 @@ $(LIB_GLOG): $(GLOG)-build-stamp
 # build glog against a system installed gtest (there's no reason to
 # "test" glog and it's highly likely it will cause a compilation bug
 # when building with clang).
+# We explicitly build only libglog.la as it is the artifact we depend
+# on. This e.g., avoids building glog-internal tests.
 $(GLOG)-build-stamp: $(GLOG)-stamp
 	cd $(GLOG) && ./configure GTEST_CONFIG=no $(CONFIGURE_ARGS) && \
-          $(MAKE) $(AM_MAKEFLAGS) $(GLOG_LDFLAGS)
+          $(MAKE) $(AM_MAKEFLAGS) $(GLOG_LDFLAGS) libglog.la
 	touch $@
 
 ALL_LOCAL += $(LIB_GLOG)
@@ -258,12 +279,64 @@ endif
 if WITH_BUNDLED_PROTOBUF
 $(PROTOBUF)/src/protoc $(PROTOBUF)/src/libprotobuf.la: $(PROTOBUF)-build-stamp
 
+# NOTE: The `--with-zlib` flag works differently between Mesos and
+# Protobuf. Protobuf uses `--with-zlib` as an on/off switch for data
+# compression instead of a path specifier for ZLib, so we need to set up
+# the `CPPFLAGS` and `LDFLAGS` if `--with-zlib=DIR` is given.
 $(PROTOBUF)-build-stamp: $(PROTOBUF)-stamp
-	cd $(PROTOBUF) && ./configure $(CONFIGURE_ARGS) && \
-        $(MAKE) $(AM_MAKEFLAGS)
+	cd $(PROTOBUF) &&				\
+	  ./configure $(CONFIGURE_ARGS)			\
+	              CPPFLAGS="$(ZLIB_INCLUDE_FLAGS)"	\
+	              LDFLAGS="$(ZLIB_LINKER_FLAGS)" &&	\
+	  $(MAKE) $(AM_MAKEFLAGS)
 	touch $@
 ALL_LOCAL += $(PROTOBUF)/src/libprotobuf.la
 ALL_LOCAL += $(PROTOBUF)/src/protoc
+
+PROTOBUF_INCLUDE_FLAGS = -I$(abs_builddir)/$(PROTOBUF)/src
+PROTOBUF_LINKER_FLAGS = -L$(abs_builddir)/$(PROTOBUF)/src/.libs
+PROTOC = $(abs_builddir)/$(PROTOBUF)/src/protoc
+else
+$(PROTOBUF)-build-stamp:
+	touch $@
+
+PROTOBUF_INCLUDE_FLAGS = @PROTOBUF_CPPFLAGS@
+PROTOBUF_LINKER_FLAGS = @PROTOBUF_LINKERFLAGS@
+PROTOC = @PROTOCOMPILER@
+endif
+
+if ENABLE_GRPC
+if WITH_BUNDLED_GRPC
+LIB_GRPC = $(GRPC)/libs/opt/libgrpc++.a		\
+           $(GRPC)/libs/opt/libgrpc.a		\
+           $(GRPC)/libs/opt/libgpr.a
+
+$(LIB_GRPC): $(GRPC)-build-stamp
+
+$(GRPC)-build-stamp: $(GRPC)-stamp		\
+                     $(PROTOBUF)-build-stamp
+	cd $(GRPC) &&				\
+	  CPPFLAGS="$(PROTOBUF_INCLUDE_FLAGS)	\
+	            $(SSL_INCLUDE_FLAGS)	\
+	            $(ZLIB_INCLUDE_FLAGS)"	\
+	  LDFLAGS="$(PROTOBUF_LINKER_FLAGS)	\
+	           $(SSL_LINKER_FLAGS)		\
+	           $(ZLIB_LINKER_FLAGS)"	\
+	  $(MAKE) $(AM_MAKEFLAGS)		\
+	          HAS_PKG_CONFIG=false		\
+	          NO_PROTOC=false		\
+	          PROTOC=$(PROTOC)
+	touch $@
+
+ALL_LOCAL += $(LIB_GRPC)
+else
+$(GRPC)-build-stamp:
+	touch $@
+endif
+endif
+
+if ENABLE_GRPC
+ALL_LOCAL += $(CSI)-stamp
 endif
 
 # Convenience library for gmock/gtest.
@@ -275,7 +348,7 @@ libgmock_la_CPPFLAGS =			\
   -I$(GTEST)/include -I$(GTEST) -I$(GTEST)/src	\
   -I$(GMOCK)/include -I$(GMOCK) -I$(GMOCK)/src
 
-  gmock_sources.cc: $(GMOCK)-stamp
+  gmock_sources.cc: $(GOOGLETEST)-stamp
 
 $(GMOCK)-build-stamp: libgmock.la
 	touch $@
@@ -294,11 +367,11 @@ BUILT_SOURCES += $(nodist_libgmock_la_SOURCES)
 if WITH_BUNDLED_LEVELDB
 # TODO(charles): Figure out PIC options in our configure.ac or create
 # a configure.ac for leveldb.
-$(LEVELDB)/libleveldb.a: $(LEVELDB)-stamp
+$(LEVELDB)/out-static/libleveldb.a: $(LEVELDB)-stamp
 	cd $(LEVELDB) && \
 	  $(MAKE) $(AM_MAKEFLAGS) CC="$(CC)" CXX="$(CXX)" OPT="$(CXXFLAGS) -fPIC"
 
-ALL_LOCAL += $(LEVELDB)/libleveldb.a
+ALL_LOCAL += $(LEVELDB)/out-static/libleveldb.a
 endif
 
 if WITH_BUNDLED_ZOOKEEPER
@@ -343,6 +416,11 @@ if WITH_BUNDLED_BOOST
 	@test -d $(INSTALLDIR)/include/boost || \
 	  rm -rf $(INSTALLDIR)/include/boost
 	cp -fpR $(BOOST)/boost $(INSTALLDIR)/include/
+endif
+if WITH_BUNDLED_CONCURRENTQUEUE
+	@test -d $(INSTALLDIR)/include/concurrentqueue || \
+	  rm -rf $(INSTALLDIR)/include/concurrentqueue
+	cp -fpR $(CONCURRENTQUEUE)/concurrentqueue.h $(INSTALLDIR)/include/
 endif
 if WITH_BUNDLED_ELFIO
 	@test -d $(INSTALLDIR)/include/elfio || \

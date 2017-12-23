@@ -21,7 +21,8 @@ Roughly, these categories are:
 The Mesos Master and Agent use the
 [Google's logging library](https://github.com/google/glog).
 For information regarding the command-line options used to configure this
-library, see the [configuration documentation](configuration.md).
+library, see the
+[configuration documentation](configuration/master-and-agent.md#logging-options).
 Google logging options that are not explicitly mentioned there can be
 configured via environment variables.
 
@@ -38,7 +39,7 @@ original level after the given duration.
 
 ## <a name="Containers"></a>Containers
 
-For background, see [the containerizer documentation](containerizer.md).
+For background, see [the containerizer documentation](containerizers.md).
 
 Mesos does not assume any structured logging for entities running inside
 containers.  Instead, Mesos will store the stdout and stderr of containers
@@ -124,7 +125,7 @@ setting the `--container_logger` Agent flag to
   [logrotate_stdout_options]
   size [max_stdout_size]
 }</pre>
-      NOTE: The <code>size</code> option will be overriden by this module.
+      NOTE: The <code>size</code> option will be overridden by this module.
     </td>
   </tr>
 
@@ -210,7 +211,7 @@ There are several caveats to consider when designing a new `ContainerLogger`:
 * The `ContainerLogger` should not assume that containers have been launched
   with any specific `ContainerLogger`.  The Agent may be restarted with a
   different `ContainerLogger`.
-* Each [containerizer](containerizer.md) running on an Agent uses its own
+* Each [containerizer](containerizers.md) running on an Agent uses its own
   instance of the `ContainerLogger`.  This means more than one `ContainerLogger`
   may be running in a single Agent.  However, each Agent will only run a single
   type of `ContainerLogger`.

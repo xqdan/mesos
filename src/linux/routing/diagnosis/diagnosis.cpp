@@ -41,13 +41,19 @@ namespace socket {
 
 static Option<net::IP> IP(nl_addr* _ip)
 {
-  Option<net::IP> result;
   if (_ip != nullptr && nl_addr_get_len(_ip) != 0) {
-    struct in_addr* addr = (struct in_addr*) nl_addr_get_binary_addr(_ip);
-    result = net::IP(*addr);
+    if (nl_addr_get_family(_ip) == AF_INET) {
+      struct in_addr* addr = (struct in_addr*)nl_addr_get_binary_addr(_ip);
+      return net::IP(*addr);
+    }
+
+    if (nl_addr_get_family(_ip) == AF_INET6) {
+      struct in6_addr* addr = (struct in6_addr*)nl_addr_get_binary_addr(_ip);
+      return net::IP(*addr);
+    }
   }
 
-  return result;
+  return None();
 }
 
 
@@ -67,6 +73,7 @@ Try<vector<Info>> infos(int family, int states)
   Netlink<struct nl_cache> cache(c);
 
   vector<Info> results;
+  results.reserve(nl_cache_nitems(cache.get()));
   for (struct nl_object* o = nl_cache_get_first(cache.get());
        o != nullptr; o = nl_cache_get_next(o)) {
     struct idiagnl_msg* msg = (struct idiagnl_msg*)o;
@@ -74,14 +81,15 @@ Try<vector<Info>> infos(int family, int states)
     // For 'state', libnl-idiag only returns the number of left
     // shifts. Convert it back to power-of-2 number.
 
-    results.push_back(Info(
+    results.emplace_back(
         idiagnl_msg_get_family(msg),
         1 << idiagnl_msg_get_state(msg),
+        idiagnl_msg_get_inode(msg),
         idiagnl_msg_get_sport(msg),
         idiagnl_msg_get_dport(msg),
         IP(idiagnl_msg_get_src(msg)),
         IP(idiagnl_msg_get_dst(msg)),
-        idiagnl_msg_get_tcpinfo(msg)));
+        idiagnl_msg_get_tcpinfo(msg));
   }
 
   return results;

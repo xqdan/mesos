@@ -23,6 +23,7 @@
 #include <mesos/mesos.hpp>
 
 #include <stout/try.hpp>
+#include <stout/uuid.hpp>
 
 namespace mesos {
 namespace internal {
@@ -47,9 +48,13 @@ namespace paths {
 //
 //   (5) For provisioning root filesystems for containers.
 //
+//   (6) For CSI plugins to preserve data that persist across slaves.
+//
 // The file system layout is as follows:
 //
 //   root ('--work_dir' flag)
+//   |-- containers
+//   |   |-- <container_id> (sandbox)
 //   |-- slaves
 //   |   |-- latest (symlink)
 //   |   |-- <slave_id>
@@ -69,6 +74,15 @@ namespace paths {
 //   |       |-- latest (symlink)
 //   |       |-- <slave_id>
 //   |           |-- slave.info
+//   |           |-- resource_providers
+//   |           |   |-- <type>
+//   |           |       |-- <name>
+//   |           |           |-- latest (symlink)
+//   |           |           |-- <resource_provider_id>
+//   |           |               |-- resource_provider.state
+//   |           |               |-- operations
+//   |           |                   |-- <operation_uuid>
+//   |           |                       |-- operation.updates
 //   |           |-- frameworks
 //   |               |-- <framework_id>
 //   |                   |-- framework.info
@@ -92,6 +106,7 @@ namespace paths {
 //   |       |-- <role>
 //   |           |-- <persistence_id> (persistent volume)
 //   |-- provisioner
+//   |-- csi
 
 
 struct ExecutorRunPath
@@ -110,7 +125,16 @@ Try<ExecutorRunPath> parseExecutorRunPath(
 
 const char LATEST_SYMLINK[] = "latest";
 
-// Helpers for obtaining paths in the layout:
+// Helpers for obtaining paths in the layout.
+// NOTE: The parameter names should adhere to the following convention:
+//
+//   (1) Use `workDir` if the helper expects the `--work_dir` flag.
+//
+//   (2) Use `metaDir` if the helper expects the meta directory.
+//
+//   (3) Use `rootDir` only if the helper is to be reused.
+//
+// TODO(chhsiao): Clean up the parameter names to follow the convention.
 
 std::string getMetaRootDir(const std::string& rootDir);
 
@@ -119,6 +143,9 @@ std::string getSandboxRootDir(const std::string& rootDir);
 
 
 std::string getProvisionerDir(const std::string& rootDir);
+
+
+std::string getCsiRootDir(const std::string& workDir);
 
 
 std::string getLatestSlavePath(const std::string& rootDir);
@@ -135,6 +162,15 @@ std::string getSlaveInfoPath(
 std::string getSlavePath(
     const std::string& rootDir,
     const SlaveID& slaveId);
+
+
+Try<std::list<std::string>> getContainerPaths(
+    const std::string& rootDir);
+
+
+std::string getContainerPath(
+    const std::string& rootDir,
+    const ContainerID& containerId);
 
 
 Try<std::list<std::string>> getFrameworkPaths(
@@ -211,6 +247,13 @@ std::string getExecutorSentinelPath(
     const ContainerID& containerId);
 
 
+// Returns the "virtual" path used to expose the executor's sandbox
+// via the /files endpoints: `/frameworks/FID/executors/EID/latest`.
+std::string getExecutorVirtualPath(
+    const FrameworkID& frameworkId,
+    const ExecutorID& executorId);
+
+
 std::string getExecutorLatestRunPath(
     const std::string& rootDir,
     const SlaveID& slaveId,
@@ -277,6 +320,58 @@ std::string getTaskUpdatesPath(
     const TaskID& taskId);
 
 
+std::string getResourceProviderRegistryPath(
+    const std::string& rootDir,
+    const SlaveID& slaveId);
+
+
+Try<std::list<std::string>> getResourceProviderPaths(
+    const std::string& metaDir,
+    const SlaveID& slaveId);
+
+
+std::string getResourceProviderPath(
+    const std::string& metaDir,
+    const SlaveID& slaveId,
+    const std::string& resourceProviderType,
+    const std::string& resourceProviderName,
+    const ResourceProviderID& resourceProviderId);
+
+
+std::string getResourceProviderStatePath(
+    const std::string& metaDir,
+    const SlaveID& slaveId,
+    const std::string& resourceProviderType,
+    const std::string& resourceProviderName,
+    const ResourceProviderID& resourceProviderId);
+
+
+std::string getLatestResourceProviderPath(
+    const std::string& metaDir,
+    const SlaveID& slaveId,
+    const std::string& resourceProviderType,
+    const std::string& resourceProviderName);
+
+
+Try<std::list<std::string>> getOperationPaths(
+    const std::string& rootDir);
+
+
+std::string getOperationPath(
+    const std::string& rootDir,
+    const id::UUID& operationUuid);
+
+
+Try<id::UUID> parseOperationPath(
+    const std::string& rootDir,
+    const std::string& dir);
+
+
+std::string getOperationUpdatesPath(
+    const std::string& rootDir,
+    const id::UUID& operationUuid);
+
+
 std::string getResourcesInfoPath(
     const std::string& rootDir);
 
@@ -286,13 +381,13 @@ std::string getResourcesTargetPath(
 
 
 std::string getPersistentVolumePath(
-    const std::string& rootDir,
+    const std::string& workDir,
     const std::string& role,
     const std::string& persistenceId);
 
 
 std::string getPersistentVolumePath(
-    const std::string& rootDir,
+    const std::string& workDir,
     const Resource& resource);
 
 
@@ -308,6 +403,18 @@ std::string createExecutorDirectory(
 std::string createSlaveDirectory(
     const std::string& rootDir,
     const SlaveID& slaveId);
+
+
+std::string createResourceProviderDirectory(
+    const std::string& rootDir,
+    const SlaveID& slaveId,
+    const std::string& resourceProviderType,
+    const std::string& resourceProviderName,
+    const ResourceProviderID& resourceProviderId);
+
+
+extern const char LIBPROCESS_PID_FILE[];
+extern const char HTTP_MARKER_FILE[];
 
 } // namespace paths {
 } // namespace slave {

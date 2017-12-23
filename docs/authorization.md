@@ -8,14 +8,14 @@ layout: documentation
 In Mesos, the authorization subsystem allows the operator to configure the
 actions that certain principals are allowed to perform. For example, the
 operator can use authorization to ensure that principal `foo` can only register
-frameworks in role `bar`, and no other principals can register frameworks in
-any role.
+frameworks subscribed to role `bar`, and no other principals can register
+frameworks subscribed to any roles.
 
 A reference implementation _local authorizer_ provides basic security for most
 use cases. This authorizer is configured using Access Control Lists (ACLs).
 Alternative implementations could express their authorization rules in
 different ways. The local authorizer is used if the
-[`--authorizers`](configuration.md) flag is not specified (or manually set to
+[`--authorizers`](configuration/master.md) flag is not specified (or manually set to
 the default value `local`) and ACLs are specified via the
 [`--acls`](configuration.md) flag.
 
@@ -24,6 +24,26 @@ concepts necessary to successfully configure the local authorizer. The second
 briefly discusses how to implement a custom authorizer; this section is not
 directed at operators but at engineers who wish to build their own authorizer
 back end.
+
+## HTTP Executor Authorization
+
+When the agent's `--authenticate_http_executors` flag is set, HTTP executors are
+required to authenticate with the HTTP executor API. When they do so, a simple
+implicit authorization rule is applied. In plain language, the rule states that
+executors can only perform actions on themselves. More specifically, an
+executor's authenticated principal must contain claims with keys `fid`, `eid`,
+and `cid`, with values equal to the currently-running executor's framework ID,
+executor ID, and container ID, respectively. By default, an authentication token
+containing these claims is injected into the executor's environment (see the
+[authentication documentation](authentication.md) for more information).
+
+Similarly, when the agent's `--authenticate_http_readwrite` flag is set, HTTP
+executor's are required to authenticate with the HTTP operator API when making
+calls such as `LAUNCH_NESTED_CONTAINER`. In this case, executor authorization is
+performed via the loaded authorizer module, if present. The default Mesos local
+authorizer applies a simple implicit authorization rule, requiring that the
+executor's principal contain a claim with key `cid` and a value equal to the
+currently-running executor's container ID.
 
 ## Local Authorizer
 
@@ -50,19 +70,19 @@ launches a Mesos framework and then attempts to destroy a persistent volume:
   be `payroll-framework`; this principal represents the trusted identity of the
   framework.
 * The framework now sends a registration message to the master. This message
-  includes a `FrameworkInfo` object containing a `principal` and a `role`; in
-  this case, it will use the role `accounting`. The principal in this message
-  must be `payroll-framework`, to match the one used by the framework for
-  authentication.
+  includes a `FrameworkInfo` object containing a `principal` and `roles`; in
+  this case, it will use a single role named `accounting`. The principal in
+  this message must be `payroll-framework`, to match the one used by the
+  framework for authentication.
 * The master consults the local authorizer, which in turn looks through its ACLs
   to see if it has a `RegisterFramework` ACL which authorizes the principal
   `payroll-framework` to register with the `accounting` role. It does find such
-  an ACL, the framework registers successfully. Now that the framework belongs
-  to the `accounting` role, any [weights](roles.md),
+  an ACL, the framework registers successfully. Now that the framework is
+  subscribed to the `accounting` role, any [weights](weights.md),
   [reservations](reservation.md), [persistent volumes](persistent-volume.md),
   or [quota](quota.md) associated with the accounting department's role will
-  apply. This allows operators to control the resource consumption of this
-  department.
+  apply when allocating resources to this role within the framework. This
+  allows operators to control the resource consumption of this department.
 * Suppose the framework has created a persistent volume on an agent which it
   now wishes to destroy. The framework sends an `ACCEPT` call containing an
   offer operation which will `DESTROY` the persistent volume.
@@ -108,7 +128,7 @@ There are two ways to disallow unauthorized uses on specific operations:
    actions to all objects except the ones explicitly allowed.
    Consider the [example below](#disallowExample) for details.
 
-2. Set `permissive` to `false` but allow for `ANY` principle to perform the
+2. Set `permissive` to `false` but allow `ANY` principal to perform the
    action on `ANY` object. This needs to be done for all actions which should
    work without being checked against ACLs. A template doing this for all
    actions can be found in [acls_template.json](../examples/acls_template.json).
@@ -117,8 +137,8 @@ More information about the structure of the ACLs can be found in
 [their definition](https://github.com/apache/mesos/blob/master/include/mesos/authorizer/acls.proto)
 inside the Mesos source code.
 
-Note that ACLs are compared in the order that they are specified. In other
-words, if an ACL allows some action and a later ACL forbids it, the action is
+ACLs are compared in the order that they are specified. In other words,
+if an ACL allows some action and a later ACL forbids it, the action is
 allowed; likewise, if the ACL forbidding the action appears earlier than the
 one allowing the action, the action is forbidden. If no ACLs match a request,
 the request is authorized if the ACLs are permissive (which is the default
@@ -127,7 +147,7 @@ are declined.
 
 ### Authorizable Actions
 
-Currently the local authorizer configuration format supports the following
+Currently, the local authorizer configuration format supports the following
 entries, each representing an authorizable action:
 
 <table class="table table-striped">
@@ -253,6 +273,56 @@ entries, each representing an authorizable action:
   </td>
   <td>Access Mesos logs.</td>
 </tr>
+<tr>
+  <td><code>register_agents</code></td>
+  <td>Agent principal.</td>
+  <td>Implicitly given. A user should only use types ANY and NONE to allow/deny
+      agent (re-)registration.
+  </td>
+  <td>(Re-)registration of agents.</td>
+</tr>
+<tr>
+  <td><code>get_maintenance_schedules</code></td>
+  <td>Operator username.</td>
+  <td>Implicitly given. A user should only use types ANY and NONE to allow/deny
+      access to the log.
+  </td>
+  <td>View the maintenance schedule of the machines used by Mesos.</td>
+</tr>
+<tr>
+  <td><code>update_maintenance_schedules</code></td>
+  <td>Operator username.</td>
+  <td>Implicitly given. A user should only use types ANY and NONE to allow/deny
+      access to the log.
+  </td>
+  <td>Modify the maintenance schedule of the machines used by Mesos.</td>
+</tr>
+<tr>
+  <td><code>start_maintenances</code></td>
+  <td>Operator username.</td>
+  <td>Implicitly given. A user should only use types ANY and NONE to allow/deny
+      access to the log.
+  </td>
+  <td>Starts maintenance on a machine. This will make a machine and its agents
+      unavailable.
+  </td>
+</tr>
+<tr>
+  <td><code>stop_maintenances</code></td>
+  <td>Operator username.</td>
+  <td>Implicitly given. A user should only use the types ANY and NONE to
+      allow/deny access to the log.
+  </td>
+  <td>Ends maintenance on a machine.</td>
+</tr>
+<tr>
+  <td><code>get_maintenance_statuses</code></td>
+  <td>Operator username.</td>
+  <td>Implicitly given. A user should only use the types ANY and NONE to
+      allow/deny access to the log.
+  </td>
+  <td>View if a machine is in maintenance or not.</td>
+</tr>
 </tbody>
 </table>
 
@@ -269,9 +339,9 @@ The `get_endpoints` action covers:
 ### Examples
 
 Consider for example the following ACL: Only principal `foo` can register
-frameworks within the `analytics` role. All principals can register to any
-other role (including the principal `foo` since permissive is the default
-behavior).
+frameworks subscribed to the `analytics` role. All principals can register
+frameworks subscribing to any other roles (including the principal `foo`
+since permissive is the default behavior).
 
 ```json
 {
@@ -296,9 +366,9 @@ behavior).
 }
 ```
 
-Principal `foo` can register frameworks with the `analytics` and `ads` roles
-and no other role. Any other principal (or framework without a principal) can
-register frameworks with any role.
+Principal `foo` can register frameworks subscribed to the `analytics` and
+`ads` roles and no other role. Any other principal (or framework without
+a principal) can register frameworks subscribed to any roles.
 
 ```json
 {
@@ -323,9 +393,9 @@ register frameworks with any role.
 }
 ```
 
-Only principal `foo` and no one else can register frameworks with the
+Only principal `foo` and no one else can register frameworks subscribed to the
 `analytics` role. Any other principal (or framework without a principal) can
-register frameworks with any other role.
+register frameworks subscribed to any other roles.
 
 ```json
 {
@@ -350,8 +420,9 @@ register frameworks with any other role.
 }
 ```
 
-Principal `foo` can register frameworks with the `analytics` role and no other
-role. No other principal can register frameworks with any role, including `*`.
+Principal `foo` can register frameworks subscribed to the `analytics` role
+and no other roles. No other principal can register frameworks subscribed to
+any roles, including `*`.
 
 ```json
 {
@@ -753,7 +824,7 @@ authorization interface consists of three parts:
 First, the `authorization::Request` protobuf message represents a request to be
 authorized. It follows the
 _[Subject-Verb-Object](https://en.wikipedia.org/wiki/Subject%E2%80%93verb%E2%80%93object)_
-pattern, where a _subject_ — commonly a principal — attempts to perform an
+pattern, where a _subject_ ---commonly a principal---attempts to perform an
 _action_ on a given _object_.
 
 Second, the
@@ -784,6 +855,7 @@ message Object {
   optional Task task = 3;
   optional TaskInfo task_info = 4;
   optional ExecutorInfo executor_info = 5;
+  optional MachineID machine_id = 11;
 }
 ```
 
@@ -798,8 +870,8 @@ one or more fields must be set
 (e.g., the `view_executors` action expects the `executor_info` and
 `framework_info` to be set).
 
-The `action` field of the `Request` message is an enum. It is kept optional —
-even though a valid action is necessary for every request — to allow for
+The `action` field of the `Request` message is an enum. It is kept optional---
+even though a valid action is necessary for every request---to allow for
 backwards compatibility when adding new fields (see
 [MESOS-4997](https://issues.apache.org/jira/browse/MESOS-4997) for details).
 
@@ -820,6 +892,7 @@ struct Object
   const Task* task;
   const TaskInfo* task_info;
   const ExecutorInfo* executor_info;
+  const MachineID* machine_id;
 };
 ```
 

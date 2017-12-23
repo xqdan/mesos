@@ -17,6 +17,7 @@
 #ifndef __MASTER_ALLOCATOR_SORTER_DRF_SORTER_HPP__
 #define __MASTER_ALLOCATOR_SORTER_DRF_SORTER_HPP__
 
+#include <algorithm>
 #include <set>
 #include <string>
 #include <vector>
@@ -25,6 +26,7 @@
 #include <mesos/resources.hpp>
 #include <mesos/values.hpp>
 
+#include <stout/check.hpp>
 #include <stout/hashmap.hpp>
 #include <stout/option.hpp>
 
@@ -38,80 +40,58 @@ namespace internal {
 namespace master {
 namespace allocator {
 
-struct Client
-{
-  Client(const std::string& _name, double _share, uint64_t _allocations)
-    : name(_name), share(_share), allocations(_allocations) {}
-
-  std::string name;
-  double share;
-
-  // We store the number of times this client has been chosen for
-  // allocation so that we can fairly share the resources across
-  // clients that have the same share. Note that this information is
-  // not persisted across master failovers, but since the point is to
-  // equalize the 'allocations' across clients of the same 'share'
-  // having allocations restart at 0 after a master failover should be
-  // sufficient (famous last words.)
-  uint64_t allocations;
-};
-
-
-struct DRFComparator
-{
-  virtual ~DRFComparator() {}
-  virtual bool operator()(const Client& client1, const Client& client2);
-};
-
-
 class DRFSorter : public Sorter
 {
 public:
-  DRFSorter() = default;
+  DRFSorter();
 
   explicit DRFSorter(
       const process::UPID& allocator,
       const std::string& metricsPrefix);
 
-  virtual ~DRFSorter() {}
+  virtual ~DRFSorter();
 
   virtual void initialize(
       const Option<std::set<std::string>>& fairnessExcludeResourceNames);
 
-  virtual void add(const std::string& name, double weight = 1);
+  virtual void add(const std::string& clientPath);
 
-  virtual void update(const std::string& name, double weight);
+  virtual void remove(const std::string& clientPath);
 
-  virtual void remove(const std::string& name);
+  virtual void activate(const std::string& clientPath);
 
-  virtual void activate(const std::string& name);
+  virtual void deactivate(const std::string& clientPath);
 
-  virtual void deactivate(const std::string& name);
+  virtual void updateWeight(const std::string& path, double weight);
 
   virtual void allocated(
-      const std::string& name,
+      const std::string& clientPath,
       const SlaveID& slaveId,
       const Resources& resources);
 
   virtual void update(
-      const std::string& name,
+      const std::string& clientPath,
       const SlaveID& slaveId,
       const Resources& oldAllocation,
       const Resources& newAllocation);
 
   virtual void unallocated(
-      const std::string& name,
+      const std::string& clientPath,
       const SlaveID& slaveId,
       const Resources& resources);
 
   virtual const hashmap<SlaveID, Resources>& allocation(
-      const std::string& name);
+      const std::string& clientPath) const;
 
-  virtual const Resources& allocationScalarQuantities(const std::string& name);
+  virtual const Resources& allocationScalarQuantities(
+      const std::string& clientPath) const;
 
-  virtual hashmap<std::string, Resources> allocation(const SlaveID& slaveId);
+  virtual hashmap<std::string, Resources> allocation(
+      const SlaveID& slaveId) const;
 
-  virtual Resources allocation(const std::string& name, const SlaveID& slaveId);
+  virtual Resources allocation(
+      const std::string& clientPath,
+      const SlaveID& slaveId) const;
 
   virtual const Resources& totalScalarQuantities() const;
 
@@ -121,53 +101,71 @@ public:
 
   virtual std::vector<std::string> sort();
 
-  virtual bool contains(const std::string& name) const;
+  virtual bool contains(const std::string& clientPath) const;
 
-  virtual int count();
+  virtual int count() const;
 
 private:
-  // Recalculates the share for the client and moves
-  // it in 'clients' accordingly.
-  void update(const std::string& name);
+  // A node in the sorter's tree.
+  struct Node;
 
-  // Returns the dominant resource share for the client.
-  double calculateShare(const std::string& name) const;
+  // Returns the dominant resource share for the node.
+  double calculateShare(const Node* node) const;
+
+  // Returns the weight associated with the node. If no weight has
+  // been configured for the node's path, the default weight (1.0) is
+  // returned.
+  double findWeight(const Node* node) const;
+
+  // Returns the client associated with the given path. Returns
+  // nullptr if the path is not found or if the path identifies an
+  // internal node in the tree (not a client).
+  Node* find(const std::string& clientPath) const;
 
   // Resources (by name) that will be excluded from fair sharing.
   Option<std::set<std::string>> fairnessExcludeResourceNames;
 
-  // Returns an iterator to the specified client, if
-  // it exists in this Sorter.
-  std::set<Client, DRFComparator>::iterator find(const std::string& name);
-
-  // If true, sort() will recalculate all shares.
+  // If true, sort() will recalculate all shares and resort the tree.
   bool dirty = false;
 
-  // A set of Clients (names and shares) sorted by share.
-  std::set<Client, DRFComparator> clients;
+  // The root node in the sorter tree.
+  Node* root;
 
-  // Maps client names to the weights that should be applied to their shares.
+  // To speed lookups, we keep a map from client paths to the leaf
+  // node associated with that client. There is an entry in this map
+  // for every leaf node in the client tree (except for the root when
+  // the tree is empty). Paths in this map do NOT contain the trailing
+  // "." label we use for leaf nodes.
+  hashmap<std::string, Node*> clients;
+
+  // Weights associated with role paths. Setting the weight for a path
+  // influences the share of all nodes in the subtree rooted at that
+  // path. This hashmap might include weights for paths that are not
+  // currently in the sorter tree.
   hashmap<std::string, double> weights;
 
   // Total resources.
-  struct Total {
-    // We need to keep track of the resources (and not just scalar quantities)
-    // to account for multiple copies of the same shared resources. We need to
-    // ensure that we do not update the scalar quantities for shared resources
-    // when the change is only in the number of copies in the sorter.
+  struct Total
+  {
+    // We need to keep track of the resources (and not just scalar
+    // quantities) to account for multiple copies of the same shared
+    // resources. We need to ensure that we do not update the scalar
+    // quantities for shared resources when the change is only in the
+    // number of copies in the sorter.
     hashmap<SlaveID, Resources> resources;
 
     // NOTE: Scalars can be safely aggregated across slaves. We keep
     // that to speed up the calculation of shares. See MESOS-2891 for
     // the reasons why we want to do that.
     //
-    // NOTE: We omit information about dynamic reservations and persistent
-    // volumes here to enable resources to be aggregated across slaves
-    // more effectively. See MESOS-4833 for more information.
+    // NOTE: We omit information about dynamic reservations and
+    // persistent volumes here to enable resources to be aggregated
+    // across slaves more effectively. See MESOS-4833 for more
+    // information.
     //
-    // Sharedness info is also stripped out when resource identities are
-    // omitted because sharedness inherently refers to the identities of
-    // resources and not quantities.
+    // Sharedness info is also stripped out when resource identities
+    // are omitted because sharedness inherently refers to the
+    // identities of resources and not quantities.
     Resources scalarQuantities;
 
     // We also store a map version of `scalarQuantities`, mapping
@@ -180,8 +178,246 @@ private:
     hashmap<std::string, Value::Scalar> totals;
   } total_;
 
-  // Allocation for a client.
-  struct Allocation {
+  // Metrics are optionally exposed by the sorter.
+  friend Metrics;
+  Option<Metrics> metrics;
+};
+
+
+// Represents a node in the sorter's tree. The structure of the tree
+// reflects the hierarchical relationships between the clients of the
+// sorter. Some (but not all) nodes correspond to sorter clients; some
+// nodes only exist to represent the structure of the sorter
+// tree. Clients are always associated with leaf nodes.
+//
+// For example, if there are two sorter clients "a/b" and "c/d", the
+// tree will contain five nodes: the root node, internal nodes for "a"
+// and "c", and leaf nodes for the clients "a/b" and "c/d".
+struct DRFSorter::Node
+{
+  // Indicates whether a node is an active leaf node, an inactive leaf
+  // node, or an internal node. Sorter clients always correspond to
+  // leaf nodes, and only leaf nodes can be activated or deactivated.
+  // The root node is always an "internal" node.
+  enum Kind
+  {
+    ACTIVE_LEAF,
+    INACTIVE_LEAF,
+    INTERNAL
+  };
+
+  Node(const std::string& _name, Kind _kind, Node* _parent)
+    : name(_name), share(0), kind(_kind), parent(_parent)
+  {
+    // Compute the node's path. Three cases:
+    //
+    //  (1) If the root node, use the empty string
+    //  (2) If a child of the root node, use the child's name
+    //  (3) Otherwise, use the parent's name, "/", and the child's name.
+    if (parent == nullptr) {
+      path = "";
+    } else if (parent->parent == nullptr) {
+      path = name;
+    } else {
+      path = strings::join("/", parent->path, name);
+    }
+  }
+
+  ~Node()
+  {
+    foreach (Node* child, children) {
+      delete child;
+    }
+  }
+
+  // The label of the edge from this node's parent to the
+  // node. "Implicit" leaf nodes are always named ".".
+  //
+  // TODO(neilc): Consider naming implicit leaf nodes in a clearer
+  // way, e.g., by making `name` an Option?
+  std::string name;
+
+  // Complete path from root to node. This includes the trailing "."
+  // label for virtual leaf nodes.
+  std::string path;
+
+  double share;
+
+  Kind kind;
+
+  Node* parent;
+
+  // Pointers to the child nodes. `children` is only non-empty if
+  // `kind` is INTERNAL_NODE. Two ordering invariants are maintained
+  // on the `children` vector:
+  //
+  // (1) All inactive leaves are stored at the end of the vector; that
+  // is, each `children` vector consists of zero or more active leaves
+  // and internal nodes, followed by zero or more inactive leaves. This
+  // means that code that only wants to iterate over active children
+  // can stop when the first inactive leaf is observed.
+  //
+  // (2) If the tree is not dirty, the active leaves and internal
+  // nodes are kept sorted by DRF share.
+  std::vector<Node*> children;
+
+  // If this node represents a sorter client, this returns the path of
+  // that client. Unlike the `path` field, this does NOT include the
+  // trailing "." label for virtual leaf nodes.
+  //
+  // For example, if the sorter contains two clients "a" and "a/b",
+  // the tree will contain four nodes: the root node, "a", "a/."
+  // (virtual leaf), and "a/b". The `clientPath()` of "a/." is "a",
+  // because that is the name of the client associated with that
+  // virtual leaf node.
+  std::string clientPath() const
+  {
+    if (name == ".") {
+      CHECK(kind == ACTIVE_LEAF || kind == INACTIVE_LEAF);
+      return CHECK_NOTNULL(parent)->path;
+    }
+
+    return path;
+  }
+
+  bool isLeaf() const
+  {
+    if (kind == ACTIVE_LEAF || kind == INACTIVE_LEAF) {
+      CHECK(children.empty());
+      return true;
+    }
+
+    return false;
+  }
+
+  void removeChild(const Node* child)
+  {
+    // Sanity check: ensure we are removing an extant node.
+    auto it = std::find(children.begin(), children.end(), child);
+    CHECK(it != children.end());
+
+    children.erase(it);
+  }
+
+  void addChild(Node* child)
+  {
+    // Sanity check: don't allow duplicates to be inserted.
+    auto it = std::find(children.begin(), children.end(), child);
+    CHECK(it == children.end());
+
+    // If we're inserting an inactive leaf, place it at the end of the
+    // `children` vector; otherwise, place it at the beginning. This
+    // maintains ordering invariant (1) above. It is up to the caller
+    // to maintain invariant (2) -- e.g., by marking the tree dirty.
+    if (child->kind == INACTIVE_LEAF) {
+      children.push_back(child);
+    } else {
+      children.insert(children.begin(), child);
+    }
+  }
+
+  // Allocation for a node.
+  struct Allocation
+  {
+    Allocation() : count(0) {}
+
+    void add(const SlaveID& slaveId, const Resources& toAdd)
+    {
+      // Add shared resources to the allocated quantities when the same
+      // resources don't already exist in the allocation.
+      const Resources sharedToAdd = toAdd.shared()
+        .filter([this, slaveId](const Resource& resource) {
+            return !resources[slaveId].contains(resource);
+        });
+
+      const Resources quantitiesToAdd =
+        (toAdd.nonShared() + sharedToAdd).createStrippedScalarQuantity();
+
+      resources[slaveId] += toAdd;
+      scalarQuantities += quantitiesToAdd;
+
+      foreach (const Resource& resource, quantitiesToAdd) {
+        totals[resource.name()] += resource.scalar();
+      }
+
+      count++;
+    }
+
+    void subtract(const SlaveID& slaveId, const Resources& toRemove)
+    {
+      CHECK(resources.contains(slaveId));
+      CHECK(resources.at(slaveId).contains(toRemove))
+        << "Resources " << resources.at(slaveId) << " at agent " << slaveId
+        << " does not contain " << toRemove;
+
+      resources[slaveId] -= toRemove;
+
+      // Remove shared resources from the allocated quantities when there
+      // are no instances of same resources left in the allocation.
+      const Resources sharedToRemove = toRemove.shared()
+        .filter([this, slaveId](const Resource& resource) {
+            return !resources[slaveId].contains(resource);
+        });
+
+      const Resources quantitiesToRemove =
+        (toRemove.nonShared() + sharedToRemove).createStrippedScalarQuantity();
+
+      foreach (const Resource& resource, quantitiesToRemove) {
+        totals[resource.name()] -= resource.scalar();
+      }
+
+      CHECK(scalarQuantities.contains(quantitiesToRemove))
+        << scalarQuantities << " does not contain " << quantitiesToRemove;
+
+      scalarQuantities -= quantitiesToRemove;
+
+      if (resources[slaveId].empty()) {
+        resources.erase(slaveId);
+      }
+    }
+
+    void update(
+        const SlaveID& slaveId,
+        const Resources& oldAllocation,
+        const Resources& newAllocation)
+    {
+      const Resources oldAllocationQuantity =
+        oldAllocation.createStrippedScalarQuantity();
+      const Resources newAllocationQuantity =
+        newAllocation.createStrippedScalarQuantity();
+
+      CHECK(resources.contains(slaveId));
+      CHECK(resources[slaveId].contains(oldAllocation))
+        << "Resources " << resources[slaveId] << " at agent " << slaveId
+        << " does not contain " << oldAllocation;
+
+      CHECK(scalarQuantities.contains(oldAllocationQuantity))
+        << scalarQuantities << " does not contain " << oldAllocationQuantity;
+
+      resources[slaveId] -= oldAllocation;
+      resources[slaveId] += newAllocation;
+
+      scalarQuantities -= oldAllocationQuantity;
+      scalarQuantities += newAllocationQuantity;
+
+      foreach (const Resource& resource, oldAllocationQuantity) {
+        totals[resource.name()] -= resource.scalar();
+      }
+
+      foreach (const Resource& resource, newAllocationQuantity) {
+        totals[resource.name()] += resource.scalar();
+      }
+    }
+
+    // We store the number of times this client has been chosen for
+    // allocation so that we can fairly share the resources across
+    // clients that have the same share. Note that this information is
+    // not persisted across master failovers, but since the point is
+    // to equalize the `count` across clients of the same `share`
+    // having allocations restart at 0 after a master failover should
+    // be sufficient (famous last words.)
+    uint64_t count;
+
     // We maintain multiple copies of each shared resource allocated
     // to a client, where the number of copies represents the number
     // of times this shared resource has been allocated to (and has
@@ -201,14 +437,21 @@ private:
     // redundantly here, investigate performance improvements to
     // `Resources` to make this unnecessary.
     hashmap<std::string, Value::Scalar> totals;
-  };
+  } allocation;
 
-  // Maps client names to the resources they have been allocated.
-  hashmap<std::string, Allocation> allocations;
+  // Compares two nodes according to DRF share.
+  static bool compareDRF(const Node* left, const Node* right)
+  {
+    if (left->share != right->share) {
+      return left->share < right->share;
+    }
 
-  // Metrics are optionally exposed by the sorter.
-  friend Metrics;
-  Option<Metrics> metrics;
+    if (left->allocation.count != right->allocation.count) {
+      return left->allocation.count < right->allocation.count;
+    }
+
+    return left->path < right->path;
+  }
 };
 
 } // namespace allocator {

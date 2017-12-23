@@ -25,13 +25,11 @@
 #include "slave/containerizer/mesos/isolators/network/cni/plugins/port_mapper/port_mapper.hpp"
 
 namespace io = process::io;
-namespace spec = mesos::internal::slave::cni::spec;
 
 using std::cerr;
 using std::endl;
 using std::map;
 using std::string;
-using std::tuple;
 using std::vector;
 
 using process::Failure;
@@ -142,13 +140,20 @@ Try<Owned<PortMapper>, PluginError> PortMapper::create(const string& _cniConfig)
 
   // While the 'args' field is optional in the CNI spec it is critical
   // to the port-mapper plugin to learn of any port-mappings that the
-  // framework might have requested for this container.
+  // framework might have requested for this container when this plugin
+  // is called in the Mesos context. However, to make the port-mapper
+  // plugin more generic rather than Mesos specific, we will create a
+  // fake 'args` field if it is not filled by the caller.
   Result<JSON::Object> args = cniConfig->find<JSON::Object>("args");
-  if (!args.isSome()) {
+  if (args.isError()) {
     return PluginError(
-        "Failed to get the required field 'args': " +
-        (args.isError() ? args.error() : "Not found"),
-        ERROR_BAD_ARGS);
+        "Failed to get the field 'args': " + args.error(), ERROR_BAD_ARGS);
+  } else if (args.isNone()) {
+    JSON::Object _args;
+    JSON::Object mesos;
+    mesos.values["network_info"] = JSON::Object();
+    _args.values["org.apache.mesos"] = mesos;
+    args = _args;
   }
 
   // NOTE: We can't directly use `find` to check for 'network_info'
@@ -407,7 +412,7 @@ Try<string, PluginError> PortMapper::handleAddCommand()
 
   // The IP from `delegateResult->ip4().ip()` is in CIDR notation. We
   // need to strip out the netmask.
-  Try<net::IPNetwork> ip = net::IPNetwork::parse(
+  Try<net::IP::Network> ip = net::IP::Network::parse(
       delegateResult->ip4().ip(),
       AF_INET);
 
@@ -492,7 +497,7 @@ Try<Option<string>, PluginError> PortMapper::execute()
 
 Result<spec::NetworkInfo> PortMapper::delegate(const string& command)
 {
-  map<std::string, std::string> environment;
+  map<string, string> environment;
 
   environment["CNI_COMMAND"] = command;
   environment["CNI_IFNAME"] = cniIfName;
@@ -511,8 +516,7 @@ Result<spec::NetworkInfo> PortMapper::delegate(const string& command)
   if (value.isSome()) {
     environment["PATH"] = value.get();
   } else {
-    environment["PATH"] =
-      "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+    environment["PATH"] = os::host_default_path();
   }
 
   Try<string> temp = os::mktemp();
@@ -562,7 +566,7 @@ Result<spec::NetworkInfo> PortMapper::delegate(const string& command)
         (result.isDiscarded() ? "discarded" : result.failure()));
   }
 
-  Future<Option<int>> status = std::get<0>(result.get());
+  const Future<Option<int>>& status = std::get<0>(result.get());
   if (!status.isReady()) {
     return Error(
         "Failed to get the exit status of the delegate CNI plugin '" +
@@ -577,7 +581,7 @@ Result<spec::NetworkInfo> PortMapper::delegate(const string& command)
   }
 
   // CNI plugin will print result or error to stdout.
-  Future<string> output = std::get<1>(result.get());
+  const Future<string>& output = std::get<1>(result.get());
   if (!output.isReady()) {
     return Error(
         "Failed to read stdout from the delegate CNI plugin '" +
@@ -588,7 +592,7 @@ Result<spec::NetworkInfo> PortMapper::delegate(const string& command)
   // We are reading stderr of the plugin since any log messages from
   // the CNI plugin would be thrown on stderr. This can be useful for
   // debugging issues when the plugin throws a `spec::Error`.
-  Future<string> err = std::get<2>(result.get());
+  const Future<string>& err = std::get<2>(result.get());
   if (!err.isReady()) {
     return Error(
         "Failed to read STDERR from the delegate CNI plugin '" +

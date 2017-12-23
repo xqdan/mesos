@@ -22,7 +22,9 @@
 
 #include <mesos/authorizer/authorizer.hpp>
 
+#ifndef __WINDOWS__
 #include <mesos/log/log.hpp>
+#endif // __WINDOWS__
 
 #include <mesos/allocator/allocator.hpp>
 
@@ -56,9 +58,15 @@
 #include <stout/strings.hpp>
 #include <stout/try.hpp>
 
+#include <stout/os/permissions.hpp>
+
 #ifdef __linux__
 #include "linux/cgroups.hpp"
 #endif
+
+#ifdef USE_SSL_SOCKET
+#include "authentication/executor/jwt_secret_generator.hpp"
+#endif // USE_SSL_SOCKET
 
 #include "authorizer/local/authorizer.hpp"
 
@@ -82,13 +90,20 @@
 #include "slave/flags.hpp"
 #include "slave/gc.hpp"
 #include "slave/slave.hpp"
-#include "slave/status_update_manager.hpp"
+#include "slave/task_status_update_manager.hpp"
 
 #include "slave/containerizer/containerizer.hpp"
 #include "slave/containerizer/fetcher.hpp"
 
 #include "tests/cluster.hpp"
 #include "tests/mock_registrar.hpp"
+
+using std::string;
+using std::vector;
+
+#ifdef USE_SSL_SOCKET
+using mesos::authentication::executor::JWTSecretGenerator;
+#endif // USE_SSL_SOCKET
 
 using mesos::master::contender::StandaloneMasterContender;
 using mesos::master::contender::ZooKeeperMasterContender;
@@ -134,8 +149,7 @@ Try<process::Owned<Master>> Master::start(
     // authorization configuration for this master.
     bool authorizationSpecified = true;
 
-    std::vector<std::string> authorizerNames =
-      strings::split(flags.authorizers, ",");
+    vector<string> authorizerNames = strings::split(flags.authorizers, ",");
 
     if (authorizerNames.empty()) {
       return Error("No authorizer specified");
@@ -145,7 +159,7 @@ Try<process::Owned<Master>> Master::start(
       return Error("Multiple authorizers not supported");
     }
 
-    std::string authorizerName = authorizerNames[0];
+    string authorizerName = authorizerNames[0];
 
     Result<Authorizer*> authorizer((None()));
     if (authorizerName != master::DEFAULT_AUTHORIZER) {
@@ -211,15 +225,16 @@ Try<process::Owned<Master>> Master::start(
 
   // Create the replicated-log-based registry, if specified in the flags.
   if (flags.registry == "replicated_log") {
+#ifndef __WINDOWS__
     if (zookeeperUrl.isSome()) {
       // Use ZooKeeper-based replicated log.
       master->log.reset(new mesos::log::Log(
           flags.quorum.get(),
           path::join(flags.work_dir.get(), "replicated_log"),
-          zookeeperUrl.get().servers,
+          zookeeperUrl->servers,
           flags.zk_session_timeout,
-          path::join(zookeeperUrl.get().path, "log_replicas"),
-          zookeeperUrl.get().authentication,
+          path::join(zookeeperUrl->path, "log_replicas"),
+          zookeeperUrl->authentication,
           flags.log_auto_initialize));
     } else {
       master->log.reset(new mesos::log::Log(
@@ -228,20 +243,28 @@ Try<process::Owned<Master>> Master::start(
           std::set<process::UPID>(),
           flags.log_auto_initialize));
     }
+#else
+    return Error("Windows does not support replicated log");
+#endif // __WINDOWS__
   }
 
   // Create the registry's storage backend.
   if (flags.registry == "in_memory") {
     master->storage.reset(new mesos::state::InMemoryStorage());
   } else if (flags.registry == "replicated_log") {
+#ifndef __WINDOWS__
     master->storage.reset(new mesos::state::LogStorage(master->log.get()));
+#else
+    return Error("Windows does not support replicated log");
+#endif // __WINDOWS__
+
   } else {
     return Error(
         "Unsupported option for registry persistence: " + flags.registry);
   }
 
   // Instantiate some other master dependencies.
-  master->state.reset(new mesos::state::protobuf::State(master->storage.get()));
+  master->state.reset(new mesos::state::State(master->storage.get()));
   master->registrar.reset(new MockRegistrar(
       flags, master->state.get(), master::READONLY_HTTP_AUTHENTICATION_REALM));
 
@@ -249,7 +272,7 @@ Try<process::Owned<Master>> Master::start(
     // Parse the flag value.
     // TODO(vinod): Move this parsing logic to flags once we have a
     // 'Rate' abstraction in stout.
-    std::vector<std::string> tokens =
+    vector<string> tokens =
       strings::tokenize(flags.agent_removal_rate_limit.get(), "/");
 
     if (tokens.size() != 2) {
@@ -377,16 +400,18 @@ void Master::setAuthorizationCallbacks(Authorizer* authorizer)
 }
 
 
-Try<process::Owned<Slave>> Slave::start(
+Try<process::Owned<Slave>> Slave::create(
     MasterDetector* detector,
     const slave::Flags& flags,
-    const Option<std::string>& id,
+    const Option<string>& id,
     const Option<slave::Containerizer*>& containerizer,
     const Option<slave::GarbageCollector*>& gc,
-    const Option<slave::StatusUpdateManager*>& statusUpdateManager,
+    const Option<slave::TaskStatusUpdateManager*>& taskStatusUpdateManager,
     const Option<mesos::slave::ResourceEstimator*>& resourceEstimator,
     const Option<mesos::slave::QoSController*>& qosController,
-    const Option<Authorizer*>& providedAuthorizer)
+    const Option<mesos::SecretGenerator*>& secretGenerator,
+    const Option<Authorizer*>& providedAuthorizer,
+    bool mock)
 {
   process::Owned<Slave> slave(new Slave());
 
@@ -400,7 +425,7 @@ Try<process::Owned<Slave>> Slave::start(
     slave->containerizer = containerizer.get();
   } else {
     // Create a new fetcher.
-    slave->fetcher.reset(new slave::Fetcher());
+    slave->fetcher.reset(new slave::Fetcher(flags));
 
     Try<slave::Containerizer*> _containerizer =
       slave::Containerizer::create(flags, true, slave->fetcher.get());
@@ -421,7 +446,7 @@ Try<process::Owned<Slave>> Slave::start(
     // authorization configuration for this agent.
     bool authorizationSpecified = true;
 
-    std::string authorizerName = flags.authorizer;
+    string authorizerName = flags.authorizer;
 
     Result<Authorizer*> createdAuthorizer((None()));
     if (authorizerName != slave::DEFAULT_AUTHORIZER) {
@@ -490,25 +515,73 @@ Try<process::Owned<Slave>> Slave::start(
     slave->qosController.reset(_qosController.get());
   }
 
-  // If the status update manager is not provided, create a default one.
-  if (statusUpdateManager.isNone()) {
-    slave->statusUpdateManager.reset(new slave::StatusUpdateManager(flags));
+  // If the QoS controller is not provided, create a default one.
+  if (secretGenerator.isNone()) {
+    SecretGenerator* _secretGenerator = nullptr;
+
+#ifdef USE_SSL_SOCKET
+    if (flags.jwt_secret_key.isSome()) {
+      Try<string> jwtSecretKey = os::read(flags.jwt_secret_key.get());
+      if (jwtSecretKey.isError()) {
+        return Error("Failed to read the file specified by --jwt_secret_key");
+      }
+
+      // TODO(greggomann): Factor the following code out into a common helper,
+      // since we also do this when loading credentials.
+      Try<os::Permissions> permissions =
+        os::permissions(flags.jwt_secret_key.get());
+      if (permissions.isError()) {
+        LOG(WARNING) << "Failed to stat jwt secret key file '"
+                     << flags.jwt_secret_key.get()
+                     << "': " << permissions.error();
+      } else if (permissions.get().others.rwx) {
+        LOG(WARNING) << "Permissions on executor secret key file '"
+                     << flags.jwt_secret_key.get()
+                     << "' are too open; it is recommended that your"
+                     << " key file is NOT accessible by others";
+      }
+
+      _secretGenerator = new JWTSecretGenerator(jwtSecretKey.get());
+    }
+#endif // USE_SSL_SOCKET
+
+    slave->secretGenerator.reset(_secretGenerator);
+  }
+
+  // If the task status update manager is not provided, create a default one.
+  if (taskStatusUpdateManager.isNone()) {
+    slave->taskStatusUpdateManager.reset(
+        new slave::TaskStatusUpdateManager(flags));
   }
 
   // Inject all the dependencies.
-  slave->slave.reset(new slave::Slave(
-      id.isSome() ? id.get() : process::ID::generate("slave"),
-      flags,
-      detector,
-      slave->containerizer,
-      &slave->files,
-      gc.getOrElse(slave->gc.get()),
-      statusUpdateManager.getOrElse(slave->statusUpdateManager.get()),
-      resourceEstimator.getOrElse(slave->resourceEstimator.get()),
-      qosController.getOrElse(slave->qosController.get()),
-      authorizer));
-
-  slave->pid = process::spawn(slave->slave.get());
+  if (mock) {
+    slave->slave.reset(new MockSlave(
+        id.isSome() ? id.get() : process::ID::generate("slave"),
+        flags,
+        detector,
+        slave->containerizer,
+        &slave->files,
+        gc.getOrElse(slave->gc.get()),
+        taskStatusUpdateManager.getOrElse(slave->taskStatusUpdateManager.get()),
+        resourceEstimator.getOrElse(slave->resourceEstimator.get()),
+        qosController.getOrElse(slave->qosController.get()),
+        secretGenerator.getOrElse(slave->secretGenerator.get()),
+        authorizer));
+  } else {
+    slave->slave.reset(new slave::Slave(
+        id.isSome() ? id.get() : process::ID::generate("slave"),
+        flags,
+        detector,
+        slave->containerizer,
+        &slave->files,
+        gc.getOrElse(slave->gc.get()),
+        taskStatusUpdateManager.getOrElse(slave->taskStatusUpdateManager.get()),
+        resourceEstimator.getOrElse(slave->resourceEstimator.get()),
+        qosController.getOrElse(slave->qosController.get()),
+        secretGenerator.getOrElse(slave->secretGenerator.get()),
+        authorizer));
+  }
 
   return slave;
 }
@@ -525,6 +598,8 @@ Slave::~Slave()
       slave::READONLY_HTTP_AUTHENTICATION_REALM);
   process::http::authentication::unsetAuthenticator(
       slave::READWRITE_HTTP_AUTHENTICATION_REALM);
+  process::http::authentication::unsetAuthenticator(
+      slave::EXECUTOR_HTTP_AUTHENTICATION_REALM);
 
   // If either `shutdown()` or `terminate()` were called already,
   // skip the below container cleanup logic.  Additionally, we can skip
@@ -537,6 +612,8 @@ Slave::~Slave()
   if (!containerizer) {
     return;
   }
+
+  terminate();
 
   // This extra closure is necessary in order to use `AWAIT` and `ASSERT_*`,
   // as these macros require a void return type.
@@ -562,11 +639,9 @@ Slave::~Slave()
     containers = containerizer->containers();
     AWAIT_READY(containers);
 
-    ASSERT_TRUE(containers.get().empty())
+    ASSERT_TRUE(containers->empty())
       << "Failed to destroy containers: " << stringify(containers.get());
   }();
-
-  terminate();
 }
 
 
@@ -597,42 +672,21 @@ void Slave::terminate()
 }
 
 
+MockSlave* Slave::mock()
+{
+  return dynamic_cast<MockSlave*>(slave.get());
+}
+
+
+void Slave::start()
+{
+  pid = process::spawn(slave.get());
+}
+
+
 void Slave::wait()
 {
   process::wait(pid);
-
-#ifdef __linux__
-  // Remove all of this processes threads into the root cgroups - this
-  // simulates the slave process terminating and permits a new slave to start
-  // when the --agent_subsystems flag is used.
-  if (flags.agent_subsystems.isSome()) {
-    foreach (const std::string& subsystem,
-             strings::tokenize(flags.agent_subsystems.get(), ",")) {
-      std::string hierarchy = path::join(flags.cgroups_hierarchy, subsystem);
-
-      std::string cgroup = path::join(flags.cgroups_root, "slave");
-
-      Try<bool> exists = cgroups::exists(hierarchy, cgroup);
-      if (exists.isError() || !exists.get()) {
-        EXIT(EXIT_FAILURE)
-          << "Failed to find cgroup " << cgroup
-          << " for subsystem " << subsystem
-          << " under hierarchy " << hierarchy
-          << " for agent: " + exists.error();
-      }
-
-      // Move all of our threads into the root cgroup.
-      Try<Nothing> assign = cgroups::assign(hierarchy, "", getpid());
-      if (assign.isError()) {
-        EXIT(EXIT_FAILURE)
-          << "Failed to move agent threads into cgroup " << cgroup
-          << " for subsystem " << subsystem
-          << " under hierarchy " << hierarchy
-          << " for agent: " + assign.error();
-      }
-    }
-  }
-#endif // __linux__
 }
 
 } // namespace cluster {

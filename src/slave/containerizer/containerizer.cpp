@@ -18,6 +18,8 @@
 #include <set>
 #include <vector>
 
+#include <mesos/secret/resolver.hpp>
+
 #include <process/dispatch.hpp>
 #include <process/owned.hpp>
 
@@ -70,13 +72,37 @@ Try<Resources> Containerizer::resources(const Flags& flags)
 
   Resources resources = parsed.get();
 
-  // NOTE: We need to check for the "cpus" string within the flag
-  // because once Resources are parsed, we cannot distinguish between
+  // NOTE: We need to check for the "cpus" resource within the flags
+  // because once the `Resources` object is created, we cannot distinguish
+  // between
   //  (1) "cpus:0", and
   //  (2) no cpus specified.
+  // due to `Resources:add` discarding empty resources.
   // We only auto-detect cpus in case (2).
   // The same logic applies for the other resources!
-  if (!strings::contains(flags.resources.getOrElse(""), "cpus")) {
+  // `Resources::fromString().get()` is safe because `Resources::parse()` above
+  // is valid.
+  vector<Resource> resourceList = Resources::fromString(
+      flags.resources.getOrElse(""), flags.default_role).get();
+
+  bool hasCpus = false;
+  bool hasMem = false;
+  bool hasDisk = false;
+  bool hasPorts = false;
+
+  foreach (const Resource& resource, resourceList) {
+    if (resource.name() == "cpus") {
+      hasCpus = true;
+    } else if (resource.name() == "mem") {
+      hasMem = true;
+    } else if (resource.name() == "disk") {
+      hasDisk = true;
+    } else if (resource.name() == "ports") {
+      hasPorts = true;
+    }
+  }
+
+  if (!hasCpus) {
     // No CPU specified so probe OS or resort to DEFAULT_CPUS.
     double cpus;
     Try<long> cpus_ = os::cpus();
@@ -112,7 +138,7 @@ Try<Resources> Containerizer::resources(const Flags& flags)
 #endif
 
   // Memory resource.
-  if (!strings::contains(flags.resources.getOrElse(""), "mem")) {
+  if (!hasMem) {
     // No memory specified so probe OS or resort to DEFAULT_MEM.
     Bytes mem;
     Try<os::Memory> mem_ = os::memory();
@@ -130,14 +156,16 @@ Try<Resources> Containerizer::resources(const Flags& flags)
       }
     }
 
+    // NOTE: The size is truncated here to preserve the existing
+    // behavior for backward compatibility.
     resources += Resources::parse(
         "mem",
-        stringify(mem.megabytes()),
+        stringify(mem.bytes() / Bytes::MEGABYTES),
         flags.default_role).get();
   }
 
   // Disk resource.
-  if (!strings::contains(flags.resources.getOrElse(""), "disk")) {
+  if (!hasDisk) {
     // No disk specified so probe OS or resort to DEFAULT_DISK.
     Bytes disk;
 
@@ -158,14 +186,16 @@ Try<Resources> Containerizer::resources(const Flags& flags)
       }
     }
 
+    // NOTE: The size is truncated here to preserve the existing
+    // behavior for backward compatibility.
     resources += Resources::parse(
         "disk",
-        stringify(disk.megabytes()),
+        stringify(disk.bytes() / Bytes::MEGABYTES),
         flags.default_role).get();
   }
 
   // Network resource.
-  if (!strings::contains(flags.resources.getOrElse(""), "ports")) {
+  if (!hasPorts) {
     // No ports specified so resort to DEFAULT_PORTS.
     resources += Resources::parse(
         "ports",
@@ -185,7 +215,8 @@ Try<Resources> Containerizer::resources(const Flags& flags)
 Try<Containerizer*> Containerizer::create(
     const Flags& flags,
     bool local,
-    Fetcher* fetcher)
+    Fetcher* fetcher,
+    SecretResolver* secretResolver)
 {
   // Get the set of containerizer types.
   const vector<string> _types = strings::split(flags.containerizers, ",");
@@ -254,8 +285,8 @@ Try<Containerizer*> Containerizer::create(
 
   foreach (const string& type, containerizerTypes) {
     if (type == "mesos") {
-      Try<MesosContainerizer*> containerizer =
-        MesosContainerizer::create(flags, local, fetcher, nvidia);
+      Try<MesosContainerizer*> containerizer = MesosContainerizer::create(
+          flags, local, fetcher, secretResolver, nvidia);
       if (containerizer.isError()) {
         return Error("Could not create MesosContainerizer: " +
                      containerizer.error());

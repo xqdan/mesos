@@ -14,17 +14,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include <mesos/quota/quota.hpp>
-
-#include <process/metrics/metrics.hpp>
-
-#include <stout/strings.hpp>
-
-#include "master/allocator/mesos/hierarchical.hpp"
 #include "master/allocator/mesos/metrics.hpp"
 
+#include <string>
+
+#include <mesos/quota/quota.hpp>
+
+#include <process/metrics/gauge.hpp>
+#include <process/metrics/metrics.hpp>
+
+#include <stout/hashmap.hpp>
+
+#include "master/allocator/mesos/hierarchical.hpp"
+
 using std::string;
-using std::vector;
 
 using process::metrics::Gauge;
 
@@ -45,12 +48,14 @@ Metrics::Metrics(const HierarchicalAllocatorProcess& _allocator)
         process::defer(
             allocator, &HierarchicalAllocatorProcess::_event_queue_dispatches)),
     allocation_runs("allocator/mesos/allocation_runs"),
-    allocation_run("allocator/mesos/allocation_run", Hours(1))
+    allocation_run("allocator/mesos/allocation_run", Hours(1)),
+    allocation_run_latency("allocator/mesos/allocation_run_latency", Hours(1))
 {
   process::metrics::add(event_queue_dispatches);
   process::metrics::add(event_queue_dispatches_);
   process::metrics::add(allocation_runs);
   process::metrics::add(allocation_run);
+  process::metrics::add(allocation_run_latency);
 
   // Create and install gauges for the total and allocated
   // amount of standard scalar resources.
@@ -89,6 +94,7 @@ Metrics::~Metrics()
   process::metrics::remove(event_queue_dispatches_);
   process::metrics::remove(allocation_runs);
   process::metrics::remove(allocation_run);
+  process::metrics::remove(allocation_run_latency);
 
   foreach (const Gauge& gauge, resources_total) {
     process::metrics::remove(gauge);

@@ -6,7 +6,7 @@ Stout is a header-only C++ library. Simply add the `include` folder to your incl
 >
 >  - Boost
 >  - Google's glog (this dependency will be removed in the future)
->  - Google's protobuf (version 2.6.1 is required to run tests)
+>  - Google's protobuf (version 3.3.x - 3.5.x is required to run tests)
 >  - Google's gmock/gtest
 
 There are a handful of data structures provided within the library (including some collections), as well as some namespaced and miscellaneous utilities. Also included are abstractions for [command line flags](#flags).
@@ -435,17 +435,15 @@ There are various ways to deal with unknown flags (i.e., `--baz` in our example 
 
 ## Collections
 
-Many of the collections and containers provided either by Boost or the C++ standard are cumbersome to use or yield brittle, hard to maintain code. For many of the standard data structures we provide wrappers with modified interfaces often simplified or enhanced using types like `Try` and `Option`.
+Many of the collections and containers provided either by Boost or the C++ standard are cumbersome to use or yield brittle, hard to maintain code. For many of the standard data structures we provide wrappers with modified interfaces often simplified or enhanced using types like `Try` and `Option`. These wrappers include `hashmap`, `hashset`, `multihashmap`, and `multimap`.
 
 > NOTE: The collections are not namespaced.
 
-Some of these wrappers use the Boost implementations of these data structures, including: `hashmap`, `hashset`, `linkedhashmap`, `multihashmap`, `multimap`.
+`LinkedHashMap` is a hashmap that maintains the order in which the keys have been inserted. This allows both constant-time access to a particular key-value pair, as well as iteration over key-value pairs according to the insertion order.
 
-There is a `Set` abstraction for working with a `std::set` as well as some overloaded operators for doing set union (`|`), set intersection (`&`), and set appending (`+`).
+There is also a `Cache` implementation that provides a templated implementation of a least-recently used (LRU) cache. Note that the key type must be compatible with `std::unordered_map`.
 
-Finally, there is a `cache` implementation (also requires Boost) that provides a templated implementation of a least-recently used (LRU) cache. Note that the key type must be compatible with `boost::unordered_map`.
-
-
+Finally, we provide some overloaded operators for doing set union (`|`), set intersection (`&`), and set appending (`+`) using `std::set`.
 
 <a href="miscellaneous"></a>
 

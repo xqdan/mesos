@@ -1,3 +1,19 @@
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 (function() {
   'use strict';
 
@@ -6,12 +22,6 @@
       $routeProvider
         .when('/',
           {templateUrl: 'static/home.html', controller: 'HomeCtrl'})
-        .when('/frameworks',
-          {templateUrl: 'static/frameworks.html', controller: 'FrameworksCtrl'})
-        .when('/frameworks/:id',
-          {templateUrl: 'static/framework.html', controller: 'FrameworkCtrl'})
-        .when('/offers',
-          {templateUrl: 'static/offers.html', controller: 'OffersCtrl'})
         .when('/agents',
           {templateUrl: 'static/agents.html', controller: 'AgentsCtrl'})
         .when('/agents/:agent_id',
@@ -20,6 +30,16 @@
           {templateUrl: 'static/agent_framework.html', controller: 'AgentFrameworkCtrl'})
         .when('/agents/:agent_id/frameworks/:framework_id/executors/:executor_id',
           {templateUrl: 'static/agent_executor.html', controller: 'AgentExecutorCtrl'})
+        .when('/frameworks',
+          {templateUrl: 'static/frameworks.html', controller: 'FrameworksCtrl'})
+        .when('/frameworks/:id',
+          {templateUrl: 'static/framework.html', controller: 'FrameworkCtrl'})
+        .when('/maintenance',
+          {templateUrl: 'static/maintenance.html', controller: 'MaintenanceCtrl'})
+        .when('/offers',
+          {templateUrl: 'static/offers.html', controller: 'OffersCtrl'})
+        .when('/roles',
+          {templateUrl: 'static/roles.html', controller: 'RolesCtrl'})
 
         // TODO(tomxing): Remove the following '/slaves/*' paths once the
         // slave->agent rename is complete(MESOS-3779).
@@ -62,18 +82,19 @@
       // [1] http://angular-ui.github.io/bootstrap/#/pagination
       paginationConfig.boundaryLinks = true;
       paginationConfig.rotate = false;
-
-      ZeroClipboard.setDefaults({
-        moviePath: '/static/obj/zeroclipboard-1.1.7.swf'
-      });
     }])
     .filter('truncateMesosID', function() {
+      // Returns a truncated ID, for example:
+      // Input: 9d4b2f2b-a759-4458-bebf-7d3507a6f0ca-S9
+      // Output: ...7d3507a6f0ca-S9
+      //
+      // Note that an ellipsis is used for display purposes.
       return function(id) {
         if (id) {
           var truncatedIdParts = id.split('-');
 
-          if (truncatedIdParts.length > 3) {
-            return '…' + truncatedIdParts.splice(3, 3).join('-');
+          if (truncatedIdParts.length > 4) {
+            return '\u2026' + truncatedIdParts.splice(4).join('-');
           } else {
             return id;
           }
@@ -88,17 +109,29 @@
         return state.substring(5);
       };
     })
+    .filter('taskHealth', function() {
+      return function(healthy) {
+        if (healthy == null) {
+          return "-";
+        }
+
+        // Note that this string value is relied on to match
+        // against CSS classes to color the UI. Changing this
+        // also requires an update to the CSS.
+        return healthy ? "healthy" : "unhealthy";
+      }
+    })
     .filter('isoDate', function($filter) {
       return function(date) {
         var i = parseInt(date, 10);
-        if (_.isNaN(i)) { return '' };
-        return $filter('date')(i, 'yyyy-MM-ddTH:mm:ssZ');
+        if (_.isNaN(i)) { return '' }
+        return $filter('date')(i, 'yyyy-MM-ddTHH:mm:ssZ');
       };
     })
     .filter('relativeDate', function() {
       return function(date, refDate) {
         var i = parseInt(date, 10);
-        if (_.isNaN(i)) { return '' };
+        if (_.isNaN(i)) { return '' }
         return relativeDate(i, refDate);
       };
     })
@@ -150,78 +183,53 @@
         }
       };
     })
-    // Defines the 'clipboard' directive, which integrates copying to the user's
-    // clipboard with an Adobe Flash object via the ZeroClipboard library.
-    //
-    // Text to be copied on click is specified with the 'data-clipboard-text'
-    // attribute.
-    //
-    // The 'mouseenter' and 'mouseleave' events from the Flash object are exposed
-    // to the directive's element via the 'clipboardhover' event. There is no
-    // differentiation between enter/leave; they are both called 'clipboardhover'.
-    //
-    // Example:
-    //
-    //     <button class="btn btn-mini" clipboard
-    //         data-clipboard-text="I'm in your clipboard!">
-    //     </button>
-    //
-    // See: http://zeroclipboard.github.io/ZeroClipboard/
     .directive('clipboard', [function() {
       return {
         restrict: 'A',
         scope: true,
         template: '<i class="glyphicon glyphicon-file"></i>',
 
-        link: function(scope, element, attrs) {
-          var clip = new ZeroClipboard(element[0]);
+        link: function(scope, element, _attrs) {
+          var clip = new Clipboard(element[0]);
 
-          clip.on('mouseover', function() {
-            angular.element(this).triggerHandler('clipboardhover');
+          element.on('mouseenter', function() {
+            element.addClass('clipboard-is-hover');
+            element.triggerHandler('clipboardhover');
           });
 
-          clip.on('mouseout', function() {
-            // TODO(ssorallen): Why is 'scope' incorrect here? It has to be
-            // retrieved from the element explicitly to be correct.
-            var elScope = angular.element(this).scope();
-
-            // Restore tooltip content to its original value if it was changed by
-            // this Clipboard instance.
-            if (elScope && elScope.tt_content_orig) {
-              elScope.tt_content = elScope.tt_content_orig;
-              delete elScope.tt_content_orig;
+          element.on('mouseleave', function() {
+            // Restore tooltip content to its original value if it was
+            // changed by this Clipboard instance.
+            if (scope && scope.tt_content_orig) {
+              scope.tt_content = scope.tt_content_orig;
+              delete scope.tt_content_orig;
             }
 
-            angular.element(this).triggerHandler('clipboardhover');
+            element.removeClass('clipboard-is-hover');
+            element.triggerHandler('clipboardhover');
           });
 
-          clip.on('complete', function() {
-            // TODO(ssorallen): Why is 'scope' incorrect here? It has to be
-            // retrieved from the element explicitly to be correct.
-            var elScope = angular.element(this).scope();
+          // Success for browsers with `execCommand` support.
+          clip.on('success', function () {
+            // Store the tooltip's original content so it can
+            // be restored when the tooltip is hidden.
+            scope.tt_content_orig = scope.tt_content;
 
-            if (elScope) {
-              // Store the tooltip's original content so it can be restored when
-              // the tooltip is hidden.
-              elScope.tt_content_orig = elScope.tt_content;
-
-              // Angular UI's Tooltip sets content on the element's scope in a
-              // variable named 'tt_content'. The Tooltip has no public interface,
-              // so set the value directly here to change the value of the tooltip
-              // when content is successfully copied.
-              elScope.tt_content = 'copied!';
-              elScope.$apply();
-            }
+            // Angular UI's Tooltip sets content on the element's scope in a
+            // variable named 'tt_content'. The Tooltip has no public interface,
+            // so set the value directly here to change the value of the tooltip
+            // when content is successfully copied.
+            scope.tt_content = 'Copied!';
+            scope.$apply();
           });
 
-          clip.on('load', function() {
-            // The 'load' event fires only if the Flash file loads successfully.
-            // The copy buttons will only display if the class 'flash' exists
-            // on an ancestor.
-            //
-            // Browsers with no flash support will not append the 'flash' class
-            // and will therefore not see the copy buttons.
-            angular.element('html').addClass('flash');
+          // Support for all other browsers without `execCommand`
+          // support. Text will be selected and user will be prompted
+          // to copy.
+          clip.on('error', function() {
+            scope.tt_content_orig = scope.tt_content;
+            scope.tt_content = 'Press Ctrl/Cmd + C to copy!';
+            scope.$apply();
           });
         }
       };
@@ -233,7 +241,7 @@
         scope: {
           value: '@'
         },
-        link: function($scope, element, attrs) {
+        link: function($scope, _element, _attrs) {
           $scope.longDate = JSON.parse(
             localStorage.getItem('longDate') || false);
 
@@ -286,6 +294,11 @@
           var setSorting = function(el) {
             var key = el.attr('data-key');
 
+            // Prevent sorting when 'data-key' is undefined.
+            if (!key) {
+              return;
+            }
+
             if (scope.columnKey === key) {
               scope.sortOrder = !scope.sortOrder;
             }
@@ -313,7 +326,7 @@
           // ---
 
           scope.$watch(attrs.tableContent, function(data) {
-            if (!data) { scope.originalData = []; return };
+            if (!data) { scope.originalData = []; return }
             if (angular.isObject(data)) { data = _.values(data) }
 
             scope.originalData = data;
@@ -342,7 +355,7 @@
           // ---
 
           // --- Filtering
-          var el = angular.element('<div m-table-header></div>');
+          el = angular.element('<div m-table-header></div>');
           $compile(el)(scope);
           element.before(el);
           // ---

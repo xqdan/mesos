@@ -20,6 +20,8 @@
 #include <stout/unreachable.hpp>
 #include <stout/windows.hpp>
 
+#include <stout/internal/windows/attributes.hpp>
+#include <stout/internal/windows/longpath.hpp>
 #include <stout/internal/windows/reparsepoint.hpp>
 #include <stout/internal/windows/symlink.hpp>
 
@@ -31,27 +33,54 @@
 namespace os {
 namespace stat {
 
-inline bool isdir(const std::string& path)
-{
-  struct _stat s;
+// Forward declaration.
+inline bool islink(const std::string& path);
 
-  if (::_stat(path.c_str(), &s) < 0) {
+inline bool isdir(
+    const std::string& path,
+    const FollowSymlink follow = FollowSymlink::FOLLOW_SYMLINK)
+{
+  // A symlink itself is not a directory.
+  // If it's not a link, we ignore `follow`.
+  if (follow == FollowSymlink::DO_NOT_FOLLOW_SYMLINK && islink(path)) {
     return false;
   }
 
-  return S_ISDIR(s.st_mode);
+  const Try<DWORD> attributes = ::internal::windows::get_file_attributes(
+      ::internal::windows::longpath(path));
+
+  if (attributes.isError()) {
+    return false;
+  }
+
+  return attributes.get() & FILE_ATTRIBUTE_DIRECTORY;
 }
 
 
-inline bool isfile(const std::string& path)
+inline bool isfile(
+    const std::string& path,
+    const FollowSymlink follow = FollowSymlink::FOLLOW_SYMLINK)
 {
-  struct _stat s;
-
-  if (::_stat(path.c_str(), &s) < 0) {
+  // A symlink itself is a file, but not a regular file.
+  // On POSIX, this check is done with `S_IFREG`, which
+  // returns false for symbolic links.
+  // If it's not a link, we ignore `follow`.
+  if (follow == FollowSymlink::DO_NOT_FOLLOW_SYMLINK && islink(path)) {
     return false;
   }
 
-  return S_ISREG(s.st_mode);
+  const Try<DWORD> attributes = ::internal::windows::get_file_attributes(
+      ::internal::windows::longpath(path));
+
+  if (attributes.isError()) {
+    return false;
+  }
+
+  // NOTE: Windows files attributes do not define a flag for "regular"
+  // files. Instead, this call will only return successfully iff the
+  // given file or directory exists. Checking against the directory
+  // flag determines if the path is a file or directory.
+  return !(attributes.get() & FILE_ATTRIBUTE_DIRECTORY);
 }
 
 
@@ -64,60 +93,44 @@ inline bool islink(const std::string& path)
 }
 
 
-// Describes the different semantics supported for the implementation
-// of `size` defined below.
-enum FollowSymlink
-{
-  DO_NOT_FOLLOW_SYMLINK,
-  FOLLOW_SYMLINK
-};
-
-
-// Returns the size in Bytes of a given file system entry. When
-// applied to a symbolic link with `follow` set to
-// `DO_NOT_FOLLOW_SYMLINK`, this will return the length of the entry
-// name (strlen).
+// Returns the size in Bytes of a given file system entry. When applied to a
+// symbolic link with `follow` set to `DO_NOT_FOLLOW_SYMLINK`, this will return
+// zero because that's what Windows says.
 inline Try<Bytes> size(
     const std::string& path,
-    const FollowSymlink follow = FOLLOW_SYMLINK)
+    const FollowSymlink follow = FollowSymlink::FOLLOW_SYMLINK)
 {
-  switch (follow) {
-    case DO_NOT_FOLLOW_SYMLINK: {
-      Try<::internal::windows::SymbolicLink> symlink =
-        ::internal::windows::query_symbolic_link_data(path);
-
-      if (symlink.isError()) {
-        return Error(symlink.error());
-      } else {
-        return Bytes(symlink.get().substitute_name.length());
-      }
-      break;
-    }
-    case FOLLOW_SYMLINK: {
-      struct _stat s;
-
-      if (::_stat(path.c_str(), &s) < 0) {
-        return ErrnoError("Error invoking stat for '" + path + "'");
-      } else {
-        return Bytes(s.st_size);
-      }
-      break;
-    }
+  const Try<SharedHandle> handle = (follow == FollowSymlink::FOLLOW_SYMLINK)
+    ? ::internal::windows::get_handle_follow(path)
+    : ::internal::windows::get_handle_no_follow(path);
+  if (handle.isError()) {
+    return Error("Error obtaining handle to file: " + handle.error());
   }
 
-  UNREACHABLE();
+  LARGE_INTEGER file_size;
+
+  if (::GetFileSizeEx(handle->get_handle(), &file_size) == 0) {
+    return WindowsError();
+  }
+
+  return Bytes(file_size.QuadPart);
 }
 
 
-inline Try<long> mtime(const std::string& path)
+// TODO(andschwa): Replace `::_stat`. See MESOS-8275.
+inline Try<long> mtime(
+    const std::string& path,
+    const FollowSymlink follow = FollowSymlink::FOLLOW_SYMLINK)
 {
-  Try<::internal::windows::SymbolicLink> symlink =
-    ::internal::windows::query_symbolic_link_data(path);
+  if (follow == FollowSymlink::DO_NOT_FOLLOW_SYMLINK) {
+    Try<::internal::windows::SymbolicLink> symlink =
+      ::internal::windows::query_symbolic_link_data(path);
 
-  if (symlink.isSome()) {
-    return Error(
-        "Requested mtime for '" + path +
-        "', but symbolic links don't have an mtime on Windows");
+    if (symlink.isSome()) {
+      return Error(
+          "Requested mtime for '" + path +
+          "', but symbolic links don't have an mtime on Windows");
+    }
   }
 
   struct _stat s;
@@ -137,9 +150,16 @@ inline Try<long> mtime(const std::string& path)
 }
 
 
-inline Try<mode_t> mode(const std::string& path)
+// TODO(andschwa): Replace `::_stat`. See MESOS-8275.
+inline Try<mode_t> mode(
+    const std::string& path,
+    const FollowSymlink follow = FollowSymlink::FOLLOW_SYMLINK)
 {
   struct _stat s;
+
+  if (follow == FollowSymlink::DO_NOT_FOLLOW_SYMLINK && islink(path)) {
+    return Error("lstat not supported for symlink '" + path + "'");
+  }
 
   if (::_stat(path.c_str(), &s) < 0) {
     return ErrnoError("Error invoking stat for '" + path + "'");
@@ -149,9 +169,16 @@ inline Try<mode_t> mode(const std::string& path)
 }
 
 
-inline Try<dev_t> dev(const std::string& path)
+// TODO(andschwa): Replace `::_stat`. See MESOS-8275.
+inline Try<dev_t> dev(
+    const std::string& path,
+    const FollowSymlink follow = FollowSymlink::FOLLOW_SYMLINK)
 {
   struct _stat s;
+
+  if (follow == FollowSymlink::DO_NOT_FOLLOW_SYMLINK && islink(path)) {
+    return Error("lstat not supported for symlink '" + path + "'");
+  }
 
   if (::_stat(path.c_str(), &s) < 0) {
     return ErrnoError("Error invoking stat for '" + path + "'");
@@ -161,9 +188,16 @@ inline Try<dev_t> dev(const std::string& path)
 }
 
 
-inline Try<ino_t> inode(const std::string& path)
+// TODO(andschwa): Replace `::_stat`. See MESOS-8275.
+inline Try<ino_t> inode(
+    const std::string& path,
+    const FollowSymlink follow = FollowSymlink::FOLLOW_SYMLINK)
 {
   struct _stat s;
+
+  if (follow == FollowSymlink::DO_NOT_FOLLOW_SYMLINK) {
+      return Error("Non-following stat not supported for '" + path + "'");
+  }
 
   if (::_stat(path.c_str(), &s) < 0) {
     return ErrnoError("Error invoking stat for '" + path + "'");

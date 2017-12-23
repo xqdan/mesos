@@ -17,7 +17,9 @@
 #ifndef __TEST_CONTAINERIZER_HPP__
 #define __TEST_CONTAINERIZER_HPP__
 
+#ifndef __WINDOWS__
 #include <unistd.h>
+#endif // __WINDOWS__
 
 #include <map>
 #include <memory>
@@ -82,27 +84,13 @@ public:
       recover,
       process::Future<Nothing>(const Option<slave::state::SlaveState>&));
 
-  MOCK_METHOD8(
+  MOCK_METHOD4(
       launch,
-      process::Future<bool>(
+      process::Future<slave::Containerizer::LaunchResult>(
           const ContainerID&,
-          const Option<TaskInfo>&,
-          const ExecutorInfo&,
-          const std::string&,
-          const Option<std::string>&,
-          const SlaveID&,
+          const mesos::slave::ContainerConfig&,
           const std::map<std::string, std::string>&,
-          bool checkpoint));
-
-  MOCK_METHOD6(
-      launch,
-      process::Future<bool>(
-          const ContainerID& containerId,
-          const CommandInfo& commandInfo,
-          const Option<ContainerInfo>& containerInfo,
-          const Option<std::string>& user,
-          const SlaveID& slaveId,
-          const Option<mesos::slave::ContainerClass>& containerClass));
+          const Option<std::string>&));
 
   MOCK_METHOD1(
       attach,
@@ -130,6 +118,14 @@ public:
       destroy,
       process::Future<bool>(const ContainerID&));
 
+  MOCK_METHOD2(
+      kill,
+      process::Future<bool>(const ContainerID&, int));
+
+  MOCK_METHOD1(
+      pruneImages,
+      process::Future<Nothing>(const std::vector<Image>&));
+
   // Additional destroy method for testing because we won't know the
   // ContainerID created for each container.
   process::Future<bool> destroy(
@@ -146,23 +142,11 @@ private:
   process::Future<Nothing> _recover(
       const Option<slave::state::SlaveState>& state);
 
-  process::Future<bool> _launch(
+  process::Future<slave::Containerizer::LaunchResult> _launch(
       const ContainerID& containerId,
-      const Option<TaskInfo>& taskInfo,
-      const ExecutorInfo& executorInfo,
-      const std::string& directory,
-      const Option<std::string>& user,
-      const SlaveID& slaveId,
+      const mesos::slave::ContainerConfig& containerConfig,
       const std::map<std::string, std::string>& environment,
-      bool checkpoint);
-
-  process::Future<bool> _launch(
-      const ContainerID& containerId,
-      const CommandInfo& commandInfo,
-      const Option<ContainerInfo>& containerInfo,
-      const Option<std::string>& user,
-      const SlaveID& slaveId,
-      const Option<mesos::slave::ContainerClass>& containerClass = None());
+      const Option<std::string>& pidCheckpointPath);
 
   process::Future<process::http::Connection> _attach(
       const ContainerID& containerId);
@@ -182,6 +166,13 @@ private:
 
   process::Future<bool> _destroy(
       const ContainerID& containerId);
+
+  process::Future<bool> _kill(
+      const ContainerID& containerId,
+      int status);
+
+  process::Future<Nothing> _pruneImages(
+      const std::vector<Image>& excludedImages);
 
   process::Owned<TestContainerizerProcess> process;
 };

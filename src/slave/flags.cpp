@@ -27,6 +27,7 @@
 
 #include "common/http.hpp"
 #include "common/parse.hpp"
+#include "common/protobuf_utils.hpp"
 
 #include "slave/constants.hpp"
 
@@ -44,7 +45,7 @@ mesos::internal::slave::Flags::Flags()
       "hostname",
       "The hostname the agent should report.\n"
       "If left unset, the hostname is resolved from the IP address\n"
-      "that the agent binds to; unless the user explicitly prevents\n"
+      "that the agent advertises; unless the user explicitly prevents\n"
       "that, using `--no-hostname_lookup`, in which case the IP itself\n"
       "is used.");
 
@@ -94,16 +95,49 @@ mesos::internal::slave::Flags::Flags()
       "  }\n"
       "]");
 
+  add(&Flags::resource_provider_config_dir,
+      "resource_provider_config_dir",
+      "Path to a directory that contains local resource provider configs.\n"
+      "Each file in the config dir should contain a JSON object representing\n"
+      "a `ResourceProviderInfo` object. Each local resource provider provides\n"
+      "resources that are local to the agent. It is also responsible for\n"
+      "handling operations on the resources it provides. Please note that\n"
+      "`resources` field might not need to be specified if the resource\n"
+      "provider determines the resources automatically.\n"
+      "\n"
+      "Example config file in this directory:\n"
+      "{\n"
+      "  \"type\": \"org.mesos.apache.rp.local.storage\",\n"
+      "  \"name\": \"lvm\"\n"
+      "}");
+
+#ifdef ENABLE_GRPC
+  add(&Flags::volume_profile_adaptor,
+      "volume_profile_adaptor",
+      "The name of the volume profile adaptor module that storage resource\n"
+      "providers should use for translating a 'volume profile' into inputs\n"
+      "consumed by various Container Storage Interface (CSI) plugins.\n"
+      "If this flag is not specified, the default behavior for storage\n"
+      "resource providers is to only expose resources for pre-existing\n"
+      "volumes and not publish RAW volumes.");
+#endif
+
   add(&Flags::isolation,
       "isolation",
-      "Isolation mechanisms to use, e.g., `posix/cpu,posix/mem`, or\n"
-      "`cgroups/cpu,cgroups/mem`, or network/port_mapping\n"
+      "Isolation mechanisms to use, e.g., `posix/cpu,posix/mem` (or \n"
+      "`windows/cpu,windows/mem` if you are on Windows), or\n"
+      "`cgroups/cpu,cgroups/mem`, or `network/port_mapping`\n"
       "(configure with flag: `--with-network-isolator` to enable),\n"
       "or `gpu/nvidia` for nvidia specific gpu isolation,\n"
       "or load an alternate isolator module using the `--modules`\n"
       "flag. Note that this flag is only relevant for the Mesos\n"
       "Containerizer.",
-      "posix/cpu,posix/mem");
+#ifndef __WINDOWS__
+      "posix/cpu,posix/mem"
+#else
+      "windows/cpu,windows/mem"
+#endif // __WINDOWS__
+      );
 
   add(&Flags::launcher,
       "launcher",
@@ -114,7 +148,7 @@ mesos::internal::slave::Flags::Flags()
       "launcher if it's running as root on Linux.",
 #ifdef __linux__
       LinuxLauncher::available() ? "linux" : "posix"
-#elif __WINDOWS__
+#elif defined(__WINDOWS__)
       "windows"
 #else
       "posix"
@@ -129,8 +163,29 @@ mesos::internal::slave::Flags::Flags()
   add(&Flags::image_provisioner_backend,
       "image_provisioner_backend",
       "Strategy for provisioning container rootfs from images,\n"
-      "e.g., `aufs`, `bind`, `copy`, `overlay`.",
-      COPY_BACKEND);
+      "e.g., `aufs`, `bind`, `copy`, `overlay`.");
+
+  add(&Flags::image_gc_config,
+      "image_gc_config",
+      "JSON-formatted configuration for automatic container image garbage\n"
+      "collection. This is an optional flag. If it is not set, it means\n"
+      "the automatic container image gc is not enabled. Users have to\n"
+      "trigger image gc manually via the operator API. If it is set, the\n"
+      "auto image gc is enabled. This image gc config can be provided either\n"
+      "as a path pointing to a local file, or as a JSON-formatted string.\n"
+      "Please note that the image garbage collection only work with Mesos\n"
+      "Containerizer for now."
+      "\n"
+      "See the ImageGcConfig message in `flags.proto` for the expected\n"
+      "format.\n"
+      "Example:\n"
+      "{\n"
+      "  \"image_disk_headroom\": 0.1,\n"
+      "  \"image_disk_watch_interval\": {\n"
+      "    \"nanoseconds\": 3600\n"
+      "  },\n"
+      "  \"excluded_images\": []\n"
+      "}");
 
   add(&Flags::appc_simple_discovery_uri_prefix,
       "appc_simple_discovery_uri_prefix",
@@ -145,10 +200,11 @@ mesos::internal::slave::Flags::Flags()
 
   add(&Flags::docker_registry,
       "docker_registry",
-      "The default url for pulling Docker images. It could either be a Docker\n"
-      "registry server url (i.e: `https://registry.docker.io`), or a local\n"
-      "path (i.e: `/tmp/docker/images`) in which Docker image archives\n"
-      "(result of `docker save`) are stored.",
+      "The default url for Mesos containerizer to pull Docker images. It\n"
+      "could either be a Docker registry server url (i.e: `https://registry.docker.io`),\n" // NOLINT(whitespace/line_length)
+      "or a local path (i.e: `/tmp/docker/images`) in which Docker image\n"
+      "archives (result of `docker save`) are stored. Note that this option\n"
+      "won't change the default registry server for Docker containerizer.",
       "https://registry-1.docker.io");
 
   add(&Flags::docker_store_dir,
@@ -181,18 +237,15 @@ mesos::internal::slave::Flags::Flags()
       "Size of the fetcher cache in Bytes.",
       DEFAULT_FETCHER_CACHE_SIZE);
 
-  // By default the fetcher cache directory is held inside the work
-  // directory, so everything can be deleted or archived in one swoop,
-  // in particular during testing. However, a typical production
-  // scenario is to use a separate cache volume. First, it is not meant
-  // to be backed up. Second, you want to avoid that sandbox directories
-  // and the cache directory can interfere with each other in
-  // unpredictable ways by occupying shared space. So it is recommended
-  // to set the cache directory explicitly.
   add(&Flags::fetcher_cache_dir,
       "fetcher_cache_dir",
-      "Parent directory for fetcher cache directories\n"
-      "(one subdirectory per agent).",
+      "Directory for the fetcher cache. The agent will clear this directory\n"
+      "on startup. It is recommended to set this value to a separate volume\n"
+      "for several reasons:\n"
+      "  * The cache directories are transient and not meant to be\n"
+      "    backed up. Upon restarting the agent, the cache is always empty.\n"
+      "  * The cache and container sandboxes can potentially interfere with\n"
+      "    each other when occupying a shared space (i.e. disk contention).",
       path::join(os::temp(), "mesos", "fetch"));
 
   add(&Flags::work_dir,
@@ -211,14 +264,29 @@ mesos::internal::slave::Flags::Flags()
       "not across reboots). This directory will be cleared on reboot.\n"
       "(Example: `/var/run/mesos`)",
       []() -> string {
-        Result<string> user = os::user();
-        CHECK_SOME(user);
+        Try<string> var = os::var();
+        if (var.isSome()) {
+#ifdef __WINDOWS__
+          const string prefix(var.get());
+#else
+          const string prefix(path::join(var.get(), "run"));
+#endif // __WINDOWS__
 
-        if (user.get() == "root") {
-            return DEFAULT_ROOT_RUNTIME_DIRECTORY;
-        } else {
-            return path::join(os::temp(), "mesos", "runtime");
+          // We check for access on the prefix because the remainder
+          // of the directory structure is created by the agent later.
+          Try<bool> access = os::access(prefix, R_OK | W_OK);
+          if (access.isSome() && access.get()) {
+#ifdef __WINDOWS__
+            return path::join(prefix, "mesos", "runtime");
+#else
+            return path::join(prefix, "mesos");
+#endif // __WINDOWS__
+          }
         }
+
+        // We provide a fallback path for ease of use in case `os::var()`
+        // errors or if the directory is not accessible.
+        return path::join(os::temp(), "mesos", "runtime");
       }());
 
   add(&Flags::launcher_dir, // TODO(benh): This needs a better name.
@@ -248,18 +316,15 @@ mesos::internal::slave::Flags::Flags()
       "NOTE: This feature is not yet supported on Windows agent, and\n"
       "therefore the flag currently does not exist on that platform.",
       true);
-
-  add(&Flags::io_switchboard_enable_server,
-      "io_switchboard_enable_server",
-      "If set to `true`, the agent will launch a per-container sidecar\n"
-      "process that runs an HTTP serve to handle incoming\n"
-      "'ATTACH_CONTAINER_INPUT' and 'ATTACH_CONTAINER_OUTPUT' calls on\n"
-      "behalf of a container. If set to 'false', this functionality\n"
-      "will not be available. The default is 'false'.\n"
-      "NOTE: This feature is not yet supported on Windows agent, and\n"
-      "therefore the flag currently does not exist on that platform.",
-      false);
 #endif // __WINDOWS__
+
+  add(&Flags::http_heartbeat_interval,
+      "http_heartbeat_interval",
+      "This flag sets a heartbeat interval (e.g. '5secs', '10mins') for\n"
+      "messages to be sent over persistent connections made against\n"
+      "the agent HTTP API. Currently, this only applies to the\n"
+      "'LAUNCH_NESTED_CONTAINER_SESSION' and 'ATTACH_CONTAINER_OUTPUT' calls.",
+      Seconds(30));
 
   add(&Flags::frameworks_home,
       "frameworks_home",
@@ -298,7 +363,7 @@ mesos::internal::slave::Flags::Flags()
       "}",
       [](const Option<JSON::Object>& object) -> Option<Error> {
         if (object.isSome()) {
-          foreachvalue (const JSON::Value& value, object.get().values) {
+          foreachvalue (const JSON::Value& value, object->values) {
             if (!value.is<JSON::String>()) {
               return Error("`executor_environment_variables` must "
                            "only contain string values");
@@ -315,6 +380,44 @@ mesos::internal::slave::Flags::Flags()
       "shutting it down (e.g., 60secs, 3mins, etc)",
       EXECUTOR_REGISTRATION_TIMEOUT);
 
+  add(&Flags::executor_reregistration_timeout,
+      "executor_reregistration_timeout",
+      "The timeout within which an executor is expected to re-register after\n"
+      "the agent has restarted, before the agent considers it gone and shuts\n"
+      "it down. Note that currently, the agent will not re-register with the\n"
+      "master until this timeout has elapsed (see MESOS-7539).",
+      EXECUTOR_REREGISTRATION_TIMEOUT,
+      [](const Duration& value) -> Option<Error> {
+        if (value > MAX_EXECUTOR_REREGISTRATION_TIMEOUT) {
+          return Error("Expected `--executor_reregistration_timeout` "
+                       "to be not more than " +
+                       stringify(MAX_EXECUTOR_REREGISTRATION_TIMEOUT));
+        }
+        return None();
+      });
+
+  // TODO(bmahler): Remove this once v0 executors are no longer supported.
+  add(&Flags::executor_reregistration_retry_interval,
+      "executor_reregistration_retry_interval",
+      "For PID-based executors, how long the agent waits before retrying\n"
+      "the reconnect message sent to the executor during recovery.\n"
+      "NOTE: Do not use this unless you understand the following\n"
+      "(see MESOS-5332): PID-based executors using Mesos libraries >= 1.1.2\n"
+      "always re-link with the agent upon receiving the reconnect message.\n"
+      "This avoids the executor replying on a half-open TCP connection to\n"
+      "the old agent (possible if netfilter is dropping packets,\n"
+      "see: MESOS-7057). However, PID-based executors using Mesos\n"
+      "libraries < 1.1.2 do not re-link and are therefore prone to\n"
+      "replying on a half-open connection after the agent restarts. If we\n"
+      "only send a single reconnect message, these \"old\" executors will\n"
+      "reply on their half-open connection and receive a RST; without any\n"
+      "retries, they will fail to reconnect and be killed by the agent once\n"
+      "the executor re-registration timeout elapses. To ensure these \"old\"\n"
+      "executors can reconnect in the presence of netfilter dropping\n"
+      "packets, we introduced optional retries of the reconnect message.\n"
+      "This results in \"old\" executors correctly establishing a link\n"
+      "when processing the second reconnect message.");
+
   add(&Flags::executor_shutdown_grace_period,
       "executor_shutdown_grace_period",
       "Default amount of time to wait for an executor to shut down\n"
@@ -324,6 +427,14 @@ mesos::internal::slave::Flags::Flags()
       "agent may decide to allot a shorter period, and failures / forcible\n"
       "terminations may occur.",
       DEFAULT_EXECUTOR_SHUTDOWN_GRACE_PERIOD);
+
+#ifdef USE_SSL_SOCKET
+  add(&Flags::jwt_secret_key,
+      "jwt_secret_key",
+      flags::DeprecatedName("executor_secret_key"),
+      "Path to a file containing the key used when generating JWT secrets.\n"
+      "This flag is only available when Mesos is built with SSL support.");
+#endif // USE_SSL_SOCKET
 
   add(&Flags::gc_delay,
       "gc_delay",
@@ -364,15 +475,36 @@ mesos::internal::slave::Flags::Flags()
       "reconnect: Reconnect with any old live executors.\n"
       "cleanup  : Kill any old live executors and exit.\n"
       "           Use this option when doing an incompatible agent\n"
-      "           or executor upgrade!).",
+      "           or executor upgrade.",
       "reconnect");
 
   add(&Flags::recovery_timeout,
       "recovery_timeout",
       "Amount of time allotted for the agent to recover. If the agent takes\n"
       "longer than recovery_timeout to recover, any executors that are\n"
-      "waiting to reconnect to the agent will self-terminate.\n",
+      "waiting to reconnect to the agent will self-terminate.\n"
+      "The best value of this flag depends on the frameworks being run.\n"
+      "For non-partition-aware frameworks, it makes sense to set this\n"
+      "close to the `agent_reregister_timeout` on the master.\n"
+      "For partition-aware frameworks, it makes sense to set this higher\n"
+      "than the timeout that the framework uses to give up on the task,\n"
+      "otherwise the executor might terminate even if the task could still\n"
+      "sucessfully reconnect to the framework.",
       RECOVERY_TIMEOUT);
+
+  add(&Flags::reconfiguration_policy,
+      "reconfiguration_policy",
+      "This flag controls which agent configuration changes are considered\n"
+      "acceptable when recovering the previous agent state. Possible values:\n"
+      "equal:    The old and the new state must match exactly.\n"
+      "additive: The new state must be a superset of the old state:\n"
+      "          it is permitted to add additional resources, attributes\n"
+      "          and domains but not to remove or to modify existing ones.\n"
+      "Note that this only affects the checking done on the agent itself,\n"
+      "the master may still reject the agent if it detects a change that it\n"
+      "considers unacceptable, which, e.g., currently happens when port or\n"
+      "hostname are changed.",
+      "equal");
 
   add(&Flags::strict,
       "strict",
@@ -428,6 +560,41 @@ mesos::internal::slave::Flags::Flags()
       "A range of the form 0xAAAA,0xBBBB, specifying the valid secondary\n"
       "handles that can be used with the primary handle. This will take\n"
       "effect only when the `--cgroups_net_cls_primary_handle is set.");
+
+  add(&Flags::allowed_devices,
+      "allowed_devices",
+      "JSON array representing the devices that will be additionally\n"
+      "whitelisted by cgroups devices subsystem. Noted that the following\n"
+      "devices always be whitelisted by default:\n"
+      "  * /dev/console\n"
+      "  * /dev/tty0\n"
+      "  * /dev/tty1\n"
+      "  * /dev/pts/*\n"
+      "  * /dev/ptmx\n"
+      "  * /dev/net/tun\n"
+      "  * /dev/null\n"
+      "  * /dev/zero\n"
+      "  * /dev/full\n"
+      "  * /dev/tty\n"
+      "  * /dev/urandom\n"
+      "  * /dev/random\n"
+      "This flag will take effect only when `cgroups/devices` is set in\n"
+      "`--isolation` flag.\n"
+      "Example:\n"
+      "{\n"
+      "  \"allowed_devices\": [\n"
+      "    {\n"
+      "      \"device\": {\n"
+      "        \"path\": \"/path/to/device\"\n"
+      "      },\n"
+      "      \"access\": {\n"
+      "        \"read\": true,\n"
+      "        \"write\": false,\n"
+      "        \"mknod\": false\n"
+      "      }\n"
+      "    }\n"
+      "  ]\n"
+      "}\n");
 
   add(&Flags::agent_subsystems,
       "agent_subsystems",
@@ -492,25 +659,20 @@ mesos::internal::slave::Flags::Flags()
       "The path to the systemd system run time directory\n",
       "/run/systemd/system");
 
-  add(&Flags::allowed_capabilities,
-      "allowed_capabilities",
-      "JSON representation of system capabilities that the operator will\n"
-      "allow for a task that will be run in a container launched by the\n"
-      "containerizer (currently only supported in MesosContainerizer).\n"
-      "This set overrides the default capabilities for the user and the\n"
-      "capabilities requested by the framework.\n"
-      "\n"
-      "The net capability for a task running in the container would be:\n"
-      "   ((F & A) & U)\n"
-      "   where F = capabilities requested by the framework.\n"
-      "         U = permitted capabilities for the agent process.\n"
-      "         A = allowed capabilities specified by this flag.\n"
+  add(&Flags::effective_capabilities,
+      "effective_capabilities",
+      flags::DeprecatedName("allowed_capabilities"),
+      "JSON representation of the Linux capabilities that the agent will\n"
+      "grant to a task that will be run in containers launched by the\n"
+      "containerizer (currently only supported by the Mesos Containerizer).\n"
+      "This set overrides the default capabilities for the user but not\n"
+      "the capabilities requested by the framework.\n"
       "\n"
       "To set capabilities the agent should have the `SETPCAP` capability.\n"
       "\n"
-      "This flag is effective iff `capabilities` isolation is enabled.\n"
-      "When `capabilities` isolation is enabled, the absense of this flag\n"
-      "would imply that the operator would allow ALL capabilities.\n"
+      "This flag is effective iff `linux/capabilities` isolation is enabled.\n"
+      "When `linux/capabilities` isolation is enabled, the absence of this\n"
+      "flag implies that the operator intends to allow ALL capabilities.\n"
       "\n"
       "Example:\n"
       "{\n"
@@ -519,7 +681,62 @@ mesos::internal::slave::Flags::Flags()
       "       \"SYS_ADMIN\"\n"
       "     ]\n"
       "}");
+
+  add(&Flags::bounding_capabilities,
+      "bounding_capabilities",
+      "JSON representation of the Linux capabilities that the operator\n"
+      "will allow as the maximum level of privilege that a task launched\n"
+      "by the containerizer may acquire (currently only supported by the\n"
+      "Mesos Containerizer).\n"
+      "\n"
+      "This flag is effective iff `linux/capabilities` isolation is enabled.\n"
+      "When `linux/capabilities` isolation is enabled, the absence of this\n"
+      "flag implies that the operator allows ALL capabilities.\n"
+      "\n"
+      "This flag has the same syntax as `--effective_capabilities`."
+     );
+
+  add(&Flags::disallow_sharing_agent_pid_namespace,
+      "disallow_sharing_agent_pid_namespace",
+      "If set to `true`, each top-level container will have its own pid\n"
+      "namespace, and if the framework requests to share the agent pid\n"
+      "namespace for the top level container, the container launch will be\n"
+      "rejected. If set to `false`, the top-level containers will share the\n"
+      "pid namespace with agent if the framework requests it. This flag will\n"
+      "be ignored if the `namespaces/pid` isolator is not enabled.\n",
+      false);
 #endif
+
+  add(&Flags::agent_features,
+      "agent_features",
+      "JSON representation of agent features to whitelist. We always require\n"
+      "'MULTI_ROLE', 'HIERARCHICAL_ROLE', and 'RESERVATION_REFINEMENT'.\n"
+      "\n"
+      "Example:\n"
+      "{\n"
+      "    \"capabilities\": [\n"
+      "        {\"type\": \"MULTI_ROLE\"},\n"
+      "        {\"type\": \"HIERARCHICAL_ROLE\"},\n"
+      "        {\"type\": \"RESERVATION_REFINEMENT\"}\n"
+      "    ]\n"
+      "}\n",
+      [](const Option<SlaveCapabilities>& agentFeatures) -> Option<Error> {
+        // Check all required capabilities are enabled.
+        if (agentFeatures.isSome()) {
+          protobuf::slave::Capabilities capabilities(
+              agentFeatures->capabilities());
+
+          if (!capabilities.multiRole ||
+              !capabilities.hierarchicalRole ||
+              !capabilities.reservationRefinement) {
+            return Error(
+                "At least the following agent features need to be enabled: "
+                "MULTI_ROLE, HIERARCHICAL_ROLE, RESERVATION_REFINEMENT");
+          }
+        }
+
+        return None();
+      });
 
   add(&Flags::firewall_rules,
       "firewall_rules",
@@ -615,10 +832,12 @@ mesos::internal::slave::Flags::Flags()
 
   add(&Flags::docker_socket,
       "docker_socket",
-      "The UNIX socket path to be mounted into the docker executor container\n"
-      "to provide docker CLI access to the docker daemon. This must be the\n"
-      "path used by the agent's docker image.\n",
-      "/var/run/docker.sock");
+      "Resource used by the agent and the executor to provide CLI access\n"
+      "to the Docker daemon. On Unix, this is typically a path to a\n"
+      "socket, such as '/var/run/docker.sock'. On Windows this must be a\n"
+      "named pipe, such as '//./pipe/docker_engine'. NOTE: This must be\n"
+      "the path used by the Docker image used to run the agent.\n",
+      DEFAULT_DOCKER_HOST_RESOURCE);
 
   add(&Flags::docker_config,
       "docker_config",
@@ -641,7 +860,140 @@ mesos::internal::slave::Flags::Flags()
       "sandbox_directory",
       "The absolute path for the directory in the container where the\n"
       "sandbox is mapped to.\n",
-      "/mnt/mesos/sandbox");
+#ifndef __WINDOWS__
+      "/mnt/mesos/sandbox"
+#else
+      "C:\\mesos\\sandbox"
+#endif // __WINDOWS__
+      );
+
+  add(&Flags::default_container_dns,
+      "default_container_dns",
+      "JSON-formatted DNS information for CNI networks (Mesos containerizer)\n"
+      "and CNM networks (Docker containerizer). For CNI networks, this flag\n"
+      "can be used to configure `nameservers`, `domain`, `search` and\n"
+      "`options`, and its priority is lower than the DNS information returned\n"
+      "by a CNI plugin, but higher than the DNS information in agent host's\n"
+      "/etc/resolv.conf. For CNM networks, this flag can be used to configure\n"
+      "`nameservers`, `search` and `options`, it will only be used if there\n"
+      "is no DNS information provided in the ContainerInfo.docker.parameters\n"
+      "message.\n"
+      "\n"
+      "See the ContainerDNS message in `flags.proto` for the expected format.\n"
+      "\n"
+      "Example:\n"
+      "{\n"
+      "  \"mesos\": [\n"
+      "    {\n"
+      "      \"network_mode\": \"CNI\",\n"
+      "      \"network_name\": \"net1\",\n"
+      "      \"dns\": {\n"
+      "        \"nameservers\": [ \"8.8.8.8\", \"8.8.4.4\" ]\n"
+      "      }\n"
+      "    }\n"
+      "  ],\n"
+      "  \"docker\": [\n"
+      "    {\n"
+      "      \"network_mode\": \"BRIDGE\",\n"
+      "      \"dns\": {\n"
+      "        \"nameservers\": [ \"8.8.8.8\", \"8.8.4.4\" ]\n"
+      "      }\n"
+      "    },\n"
+      "    {\n"
+      "      \"network_mode\": \"USER\",\n"
+      "      \"network_name\": \"net2\",\n"
+      "      \"dns\": {\n"
+      "        \"nameservers\": [ \"8.8.8.8\", \"8.8.4.4\" ]\n"
+      "      }\n"
+      "    }\n"
+      "  ]\n"
+      "}",
+      [](const Option<ContainerDNSInfo>& defaultContainerDNS) -> Option<Error> {
+        if (defaultContainerDNS.isSome()) {
+          Option<ContainerDNSInfo::MesosInfo> defaultCniDNS;
+          hashmap<string, ContainerDNSInfo::MesosInfo> cniNetworkDNS;
+          Option<ContainerDNSInfo::DockerInfo> dockerBridgeDNS;
+          Option<ContainerDNSInfo::DockerInfo> defaultDockerUserDNS;
+          hashmap<string, ContainerDNSInfo::DockerInfo> dockerUserDNS;
+
+          foreach (const ContainerDNSInfo::MesosInfo& dnsInfo,
+                   defaultContainerDNS->mesos()) {
+            if (dnsInfo.network_mode() ==
+                ContainerDNSInfo::MesosInfo::UNKNOWN) {
+              return Error("UNKNOWN network mode configured "
+                           "in `--default_container_dns`");
+            } else if (dnsInfo.network_mode() ==
+                       ContainerDNSInfo::MesosInfo::HOST) {
+              return Error("Configuring DNS for HOST network with "
+                           "`--default_container_dns` is not yet supported");
+            } else if (dnsInfo.network_mode() ==
+                       ContainerDNSInfo::MesosInfo::CNI) {
+              if (!dnsInfo.has_network_name()) {
+                if (defaultCniDNS.isSome()) {
+                  return Error("Multiple DNS configuration without network "
+                               "name for CNI network in "
+                               "`--default_container_dns` is not allowed");
+                }
+
+                defaultCniDNS = dnsInfo;
+              } else {
+                if (cniNetworkDNS.contains(dnsInfo.network_name())) {
+                  return Error("Multiple DNS configuration with the same "
+                               "network name '" + dnsInfo.network_name() + "' "
+                               "for CNI network in `--default_container_dns` "
+                               "is not allowed");
+                }
+
+                cniNetworkDNS[dnsInfo.network_name()] = dnsInfo;
+              }
+            }
+          }
+
+          foreach (const ContainerDNSInfo::DockerInfo& dnsInfo,
+                   defaultContainerDNS->docker()) {
+            if (dnsInfo.network_mode() ==
+                ContainerDNSInfo::DockerInfo::UNKNOWN) {
+              return Error("UNKNOWN network mode configured "
+                           "in `--default_container_dns`");
+            } else if (dnsInfo.network_mode() ==
+                       ContainerDNSInfo::DockerInfo::HOST) {
+              return Error("Configuring DNS for HOST network with "
+                           "`--default_container_dns` is not yet supported");
+            } else if (dnsInfo.network_mode() ==
+                       ContainerDNSInfo::DockerInfo::BRIDGE) {
+              if (dockerBridgeDNS.isSome()) {
+                return Error("Multiple DNS configuration for Docker default "
+                             "bridge network in `--default_container_dns` is "
+                             "not allowed");
+              }
+
+              dockerBridgeDNS = dnsInfo;
+            } else if (dnsInfo.network_mode() ==
+                       ContainerDNSInfo::DockerInfo::USER) {
+              if (!dnsInfo.has_network_name()) {
+                if (defaultDockerUserDNS.isSome()) {
+                  return Error("Multiple DNS configuration without network "
+                               "name for user-defined CNM network in "
+                               "`--default_container_dns` is not allowed");
+                }
+
+                defaultDockerUserDNS = dnsInfo;
+              } else {
+                if (dockerUserDNS.contains(dnsInfo.network_name())) {
+                  return Error("Multiple DNS configuration with the same "
+                               "network name '" + dnsInfo.network_name() +
+                               "' for user-defined CNM network in "
+                               "`--default_container_dns` is not allowed");
+                }
+
+                dockerUserDNS[dnsInfo.network_name()] = dnsInfo;
+              }
+            }
+          }
+        }
+
+        return None();
+      });
 
   add(&Flags::default_container_info,
       "default_container_info",
@@ -671,7 +1023,7 @@ mesos::internal::slave::Flags::Flags()
       "policy instead.",
       Seconds(0));
 
-#ifdef WITH_NETWORK_ISOLATOR
+#ifdef ENABLE_PORT_MAPPING_ISOLATOR
   add(&Flags::ephemeral_ports_per_container,
       "ephemeral_ports_per_container",
       "Number of ephemeral ports allocated to a container by the network\n"
@@ -735,7 +1087,23 @@ mesos::internal::slave::Flags::Flags()
       "isolator.",
       false);
 
-#endif // WITH_NETWORK_ISOLATOR
+#endif // ENABLE_PORT_MAPPING_ISOLATOR
+
+#ifdef ENABLE_NETWORK_PORTS_ISOLATOR
+  add(&Flags::container_ports_watch_interval,
+      "container_ports_watch_interval",
+      "Interval at which the `network/ports` isolator should check for\n"
+      "containers listening on ports they don't have resources for.",
+      Seconds(30));
+
+  add(&Flags::check_agent_port_range_only,
+      "check_agent_port_range_only",
+      "When this is true, the `network/ports` isolator allows tasks to\n"
+      "listen on additional ports provided they fall outside the range\n"
+      "published by the agent's resources. Otherwise tasks are restricted\n"
+      "to only listen on ports for which they have been assigned resources.",
+      false);
+#endif // ENABLE_NETWORK_PORTS_ISOLATOR
 
   add(&Flags::network_cni_plugins_dir,
       "network_cni_plugins_dir",
@@ -819,7 +1187,7 @@ mesos::internal::slave::Flags::Flags()
       "modules_dir",
       "Directory path of the module manifest files.\n"
       "The manifest files are processed in alphabetical order.\n"
-      "(See --modules for more information on module manifest files)\n"
+      "(See --modules for more information on module manifest files).\n"
       "Cannot be used in conjunction with --modules.\n");
 
   add(&Flags::authenticatee,
@@ -844,12 +1212,9 @@ mesos::internal::slave::Flags::Flags()
   add(&Flags::http_authenticators,
       "http_authenticators",
       "HTTP authenticator implementation to use when handling requests to\n"
-      "authenticated endpoints. Use the default\n"
-      "`" + string(DEFAULT_HTTP_AUTHENTICATOR) + "`, or load an alternate\n"
-      "HTTP authenticator module using `--modules`.\n"
-      "\n"
-      "Currently there is no support for multiple HTTP authenticators.",
-      DEFAULT_HTTP_AUTHENTICATOR);
+      "authenticated endpoints. Use the default "
+      "`" + string(DEFAULT_BASIC_HTTP_AUTHENTICATOR) + "`, or load an\n"
+      "alternate HTTP authenticator module using `--modules`.");
 
   add(&Flags::authenticate_http_readwrite,
       "authenticate_http_readwrite",
@@ -864,6 +1229,15 @@ mesos::internal::slave::Flags::Flags()
       "supporting authentication are allowed. If `false`, unauthenticated\n"
       "requests to such HTTP endpoints are also allowed.",
       false);
+
+#ifdef USE_SSL_SOCKET
+  add(&Flags::authenticate_http_executors,
+      "authenticate_http_executors",
+      "If `true`, only authenticated requests for the HTTP executor API are\n"
+      "allowed. If `false`, unauthenticated requests are also allowed. This\n"
+      "flag is only available when Mesos is built with SSL support.",
+      false);
+#endif // USE_SSL_SOCKET
 
   add(&Flags::http_credentials,
       "http_credentials",
@@ -884,6 +1258,13 @@ mesos::internal::slave::Flags::Flags()
       "hooks",
       "A comma-separated list of hook modules to be\n"
       "installed inside the agent.");
+
+  add(&Flags::secret_resolver,
+      "secret_resolver",
+      "The name of the secret resolver module to use for resolving\n"
+      "environment and file-based secrets. If this flag is not specified,\n"
+      "the default behavior is to resolve value-based secrets and error on\n"
+      "reference-based secrets.");
 
   add(&Flags::resource_estimator,
       "resource_estimator",
@@ -931,4 +1312,111 @@ mesos::internal::slave::Flags::Flags()
       "NOTE: This flag is *experimental* and should not be used in\n"
       "production yet.",
       false);
+
+  add(&Flags::ip,
+      "ip",
+      "IP address to listen on. This cannot be used in conjunction\n"
+      "with `--ip_discovery_command`.");
+
+  add(&Flags::ip6,
+      "ip6",
+      "IPv6 address to listen on. This cannot be used in conjunction\n"
+      "with '--ip6_discovery_command'.\n"
+      "\n"
+      "NOTE: Currently Mesos doesn't listen on IPv6 sockets and hence\n"
+      "this IPv6 address is only used to advertise IPv6 addresses for\n"
+      "containers running on the host network.\n",
+      [](const Option<string>& ip6) -> Option<Error> {
+        if (ip6.isSome()) {
+          LOG(WARNING) << "Currently Mesos doesn't listen on IPv6 sockets"
+                       << "and hence the IPv6 address " << ip6.get() << " "
+                       << "will only be used to advertise IPv6 addresses"
+                       << "for containers running on the host network";
+        }
+
+        return None();
+      });
+
+  add(&Flags::port, "port", "Port to listen on.", SlaveInfo().port());
+
+  add(&Flags::advertise_ip,
+      "advertise_ip",
+      "IP address advertised to reach this Mesos slave.\n"
+      "The slave does not bind to this IP address.\n"
+      "However, this IP address may be used to access this slave.");
+
+  add(&Flags::advertise_port,
+      "advertise_port",
+      "Port advertised to reach this Mesos slave (along with\n"
+      "`advertise_ip`). The slave does not bind to this port.\n"
+      "However, this port (along with `advertise_ip`) may be used to\n"
+      "access this slave.");
+
+  add(&Flags::master,
+      "master",
+      "May be one of:\n"
+      "  `host:port`\n"
+      "  `zk://host1:port1,host2:port2,.../path`\n"
+      "  `zk://username:password@host1:port1,host2:port2,.../path`\n"
+      "  `file:///path/to/file` (where file contains one of the above)");
+
+  // TODO(xujyan): Pull master constant ZOOKEEPER_SESSION_TIMEOUT into
+  // a common constants header.
+  add(&Flags::zk_session_timeout,
+      "zk_session_timeout",
+      "ZooKeeper session timeout.",
+      Seconds(10));
+
+  add(&Flags::ip_discovery_command,
+      "ip_discovery_command",
+      "Optional IP discovery binary: if set, it is expected to emit\n"
+      "the IP address which the slave will try to bind to.\n"
+      "Cannot be used in conjunction with `--ip`.");
+
+  add(&Flags::ip6_discovery_command,
+      "ip6_discovery_command",
+      "Optional IPv6 discovery binary: if set, it is expected to emit\n"
+      "the IPv6 address on which Mesos will try to bind when IPv6 socket\n"
+      "support is enabled in Mesos.\n"
+      "\n"
+      "NOTE: Currently Mesos doesn't listen on IPv6 sockets and hence\n"
+      "this IPv6 address is only used to advertise IPv6 addresses for\n"
+      "containers running on the host network.\n");
+
+  add(&Flags::domain,
+      "domain",
+      "Domain that the agent belongs to. Mesos currently only supports\n"
+      "fault domains, which identify groups of hosts with similar failure\n"
+      "characteristics. A fault domain consists of a region and a zone.\n"
+      "If this agent is placed in a different region than the master, it\n"
+      "will not appear in resource offers to frameworks that have not\n"
+      "enabled the REGION_AWARE capability. This value can be specified\n"
+      "as either a JSON-formatted string or a file path containing JSON.\n"
+      "\n"
+      "Example:\n"
+      "{\n"
+      "  \"fault_domain\":\n"
+      "    {\n"
+      "      \"region\":\n"
+      "        {\n"
+      "          \"name\": \"aws-us-east-1\"\n"
+      "        },\n"
+      "      \"zone\":\n"
+      "        {\n"
+      "          \"name\": \"aws-us-east-1a\"\n"
+      "        }\n"
+      "    }\n"
+      "}",
+      [](const Option<DomainInfo>& domain) -> Option<Error> {
+        if (domain.isSome()) {
+          // Don't let the user specify a domain without a fault
+          // domain. This is allowed by the protobuf spec (for forward
+          // compatibility with possible future changes), but is not a
+          // useful configuration right now.
+          if (!domain->has_fault_domain()) {
+            return Error("`domain` must define `fault_domain`");
+          }
+        }
+        return None();
+      });
 }

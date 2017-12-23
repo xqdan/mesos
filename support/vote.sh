@@ -19,21 +19,38 @@ VERSION=${1}
 CANDIDATE=${2}
 TAG="${VERSION}-rc${CANDIDATE}"
 
-echo "${GREEN}Voting for mesos-${VERSION} candidate ${CANDIDATE}${NORMAL}"
+if ! git rev-parse "$TAG" > /dev/null 2>&1; then
+  echo "Tag $TAG doesn't exist. Please create one using:"
+  echo "  git tag -a $TAG -m \"Tagging Mesos $TAG.\""
+  exit 1
+fi
+
+if [ "$(git cat-file -t $TAG)" != "tag" ]; then
+  echo "Tag $TAG is not annotated. First delete the existing tag using:"
+  echo "  git tag -d $TAG"
+  echo "Then create an annotated tag using:"
+  echo "  git tag -a $TAG -m \"Tagging Mesos $TAG.\""
+  exit 1;
+fi
+
+echo "${GREEN}Tagging and Voting for mesos-${VERSION} candidate ${CANDIDATE}${NORMAL}"
 
 read -p "Hit enter to continue ... "
 
 MESOS_GIT_URL="https://git-wip-us.apache.org/repos/asf/mesos.git"
 
-WORK_DIR=`mktemp -d /tmp/mesos-vote-XXXX`
+# Get the absolute path of the local git clone.
+MESOS_GIT_LOCAL=$(cd "$(dirname $0)"/..; pwd)
+
+WORK_DIR=`mktemp -d /tmp/mesos-tag-vote-XXXX`
 atexit "rm -rf ${WORK_DIR}"
 
 pushd ${WORK_DIR}
 
 echo "${GREEN}Checking out ${TAG}${NORMAL}"
 
-# First checkout the release tag.
-git clone --depth 1 --branch ${TAG} ${MESOS_GIT_URL}
+# Make a shallow clone from the local git repository.
+git clone --shared ${MESOS_GIT_LOCAL} --branch ${TAG} mesos
 
 pushd mesos
 
@@ -63,6 +80,9 @@ MAVEN_REPO=""
 while [ -z ${MAVEN_REPO} ]; do
   read  -p "Please *close* the staging repository and provide its URL here: " MAVEN_REPO
 done
+
+echo "${GREEN}Pushing the git tag to the repository...${NORMAL}"
+git push ${MESOS_GIT_URL} refs/tags/${TAG}
 
 # Build the distribution.
 echo "${GREEN}Building the distribution ...${NORMAL}"
@@ -144,7 +164,7 @@ ${SVN_DEV_REPO}/${TAG}/${TARBALL}.asc
 The PGP key used to sign the release is here:
 https://dist.apache.org/repos/dist/release/mesos/KEYS
 
-The JAR is up in Maven in a staging repository here:
+The JAR is in a staging repository here:
 ${MAVEN_REPO}
 
 Please vote on releasing this package as Apache Mesos ${VERSION}!

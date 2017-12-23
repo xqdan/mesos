@@ -18,6 +18,7 @@
 #error "stout/os/linux.hpp is only available on Linux systems."
 #endif // __linux__
 
+#include <sys/mman.h>
 #include <sys/types.h> // For pid_t.
 
 #include <list>
@@ -33,7 +34,6 @@
 #include <stout/result.hpp>
 #include <stout/try.hpp>
 
-#include <stout/os/pagesize.hpp>
 #include <stout/os/process.hpp>
 
 namespace os {
@@ -51,39 +51,102 @@ static int childMain(void* _func)
 
 // Helper that captures information about a stack to be used when
 // invoking clone.
-struct Stack
+class Stack
 {
+public:
+  // 8 MiB is the default for "ulimit -s" on OSX and Linux.
+  static constexpr size_t DEFAULT_SIZE = 8 * 1024 * 1024;
+
+  // Allocate a stack. Note that this is NOT async signal safe, nor
+  // safe to call between fork and exec.
+  static Try<Stack> create(size_t size)
+  {
+    Stack stack(size);
+
+    if (!stack.allocate()) {
+      return ErrnoError();
+    }
+
+    return stack;
+  }
+
+  explicit Stack(size_t size_) : size(size_) {}
+
+  // Allocate the stack using mmap. We avoid malloc because we want
+  // this to be safe to use between fork and exec where malloc might
+  // deadlock. Returns false and sets `errno` on failure.
+  bool allocate()
+  {
+    int flags = MAP_PRIVATE | MAP_ANONYMOUS;
+
+#if defined(MAP_STACK)
+    flags |= MAP_STACK;
+#endif
+
+    address = ::mmap(nullptr, size, PROT_READ | PROT_WRITE, flags, -1, 0);
+    if (address == MAP_FAILED) {
+      return false;
+    }
+
+    return true;
+  }
+
+  // Explicitly free the stack.
+  // The destructor won't free the allocated stack.
+  void deallocate()
+  {
+    PCHECK(::munmap(address, size) == 0);
+    address = MAP_FAILED;
+  }
+
+  // Stack grows down, return the first usable address.
+  char* start() const
+  {
+    return address == MAP_FAILED
+      ? nullptr
+      : (static_cast<char*>(address) + size);
+  }
+
+private:
   size_t size;
-  unsigned long long* address;
+  void* address = MAP_FAILED;
 };
+
+
+namespace signal_safe {
+
+
+inline pid_t clone(
+    const Stack& stack,
+    int flags,
+    const lambda::function<int()>& func)
+{
+  return ::clone(childMain, stack.start(), flags, (void*) &func);
+}
+
+} // namespace signal_safe {
 
 
 inline pid_t clone(
     const lambda::function<int()>& func,
-    int flags,
-    Option<Stack> stack = None())
+    int flags)
 {
   // Stack for the child.
-  // - unsigned long long used for best alignment.
-  // - 8 MiB appears to be the default for "ulimit -s" on OSX and Linux.
   //
   // NOTE: We need to allocate the stack dynamically. This is because
   // glibc's 'clone' will modify the stack passed to it, therefore the
   // stack must NOT be shared as multiple 'clone's can be invoked
   // simultaneously.
-  bool cleanup = false;
-  if (stack.isNone()) {
-    stack = Stack();
-    stack->size = 8 * 1024 * 1024;
-    stack->address =
-      new unsigned long long[stack->size/sizeof(unsigned long long)];
-    cleanup = true;
+  Stack stack(Stack::DEFAULT_SIZE);
+
+  if (!stack.allocate()) {
+    // TODO(jpeach): In MESOS-8155, we will return an
+    // ErrnoError() here, but for now keep the interface
+    // compatible.
+    return -1;
   }
 
-  // Compute the address of the stack given that it grows down.
-  void* address = &stack->address[stack->size / sizeof(stack->address[0]) - 1];
-
-  pid_t pid = ::clone(childMain, address, flags, (void*) &func);
+  pid_t pid = signal_safe::clone(stack, flags, func);
 
   // Given we allocated the stack ourselves, there are two
   // circumstances where we need to delete the allocated stack to
@@ -96,8 +159,10 @@ inline pid_t clone(
   //     calling process. If CLONE_VM is set ::clone will create a
   //     thread which runs in the same memory space with the calling
   //     process, in which case we don't want to call delete!
-  if (cleanup && (pid < 0 || !(flags & CLONE_VM))) {
-    delete[] stack->address;
+  //
+  // TODO(jpeach): In case (2) we will leak the stack memory.
+  if (pid < 0 || !(flags & CLONE_VM)) {
+    stack.deallocate();
   }
 
   return pid;

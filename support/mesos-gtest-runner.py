@@ -33,6 +33,7 @@ from __future__ import print_function
 import multiprocessing
 import optparse
 import os
+import shlex
 import signal
 import subprocess
 import sys
@@ -41,7 +42,7 @@ import sys
 DEFAULT_NUM_JOBS = int(multiprocessing.cpu_count() * 1.5)
 
 
-class Bcolors:
+class Bcolors(object):
     """
     A collection of tty output modifiers.
 
@@ -92,10 +93,10 @@ def run_test(opts):
         print(Bcolors.colorize('.', Bcolors.OKGREEN), end='')
         sys.stdout.flush()
         return True, output
-    except subprocess.CalledProcessError as ex:
+    except subprocess.CalledProcessError as error:
         print(Bcolors.colorize('.', Bcolors.FAIL), end='')
         sys.stdout.flush()
-        return False, ex.output
+        return False, error.output
 
 
 def parse_arguments():
@@ -122,7 +123,24 @@ def parse_arguments():
         ' 1 also shows full logs of failed shards, and anything'
         ' >1 shows all output. DEFAULT: 1')
 
-    (options, executable) = parser.parse_args()
+    parser.epilog = (
+        'The environment variable MESOS_GTEST_RUNNER_FLAGS '
+        'can be used to set a default set of flags. Flags passed on the '
+        'command line always have precedence over these defaults.')
+
+    # If the environment variable `MESOS_GTEST_RUNNER_FLAGS` is set we
+    # use it to set a default set of flags to pass. Flags passed on
+    # the command line always have precedence over these defaults.
+    #
+    # We manually construct `args` here and make use of the fact that
+    # in `optparser`'s implementation flags passed later on the
+    # command line overrule identical flags passed earlier.
+    args = []
+    if 'MESOS_GTEST_RUNNER_FLAGS' in os.environ:
+        args.extend(shlex.split(os.environ['MESOS_GTEST_RUNNER_FLAGS']))
+    args.extend(sys.argv[1:])
+
+    (options, executable) = parser.parse_args(args)
 
     if not executable:
         parser.print_usage()
@@ -268,9 +286,9 @@ if __name__ == '__main__':
 
         sys.exit(1)
 
-    except OSError as ex:
+    except OSError as error:
         print(Bcolors.colorize(
-            '\nERROR: {ex}'.format(ex=ex),
+            '\nERROR: {err}'.format(err=error),
             Bcolors.FAIL, Bcolors.BOLD))
 
         POOL.terminate()

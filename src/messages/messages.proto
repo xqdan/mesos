@@ -14,9 +14,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+syntax = "proto2";
+
 import "mesos/mesos.proto";
+import "mesos/resource_provider/resource_provider.proto";
 
 package mesos.internal;
+
+option cc_enable_arenas = true;
 
 // TODO(benh): Consider splitting these messages into different "packages"
 // which represent which messages get handled by which components (e.g., the
@@ -32,6 +37,11 @@ package mesos.internal;
  * passing it from the agent to the framework that spawned the task.
  *
  * See protobuf::createStatusUpdate.
+ *
+ * A task status update may be used for guaranteed delivery of some
+ * task-related information, e.g., task's health update. Such information
+ * may be shadowed by subsequent task status updates, that do not preserve
+ * fields of the previously sent message.
  */
 message StatusUpdate {
   required FrameworkID framework_id = 1;
@@ -49,9 +59,10 @@ message StatusUpdate {
 
   // This corresponds to the latest state of the task according to the
   // agent. Note that this state might be different than the state in
-  // 'status' because status update manager queues updates. In other
-  // words, 'status' corresponds to the update at top of the queue and
-  // 'latest_state' corresponds to the update at bottom of the queue.
+  // 'status' because task status update manager queues updates. In
+  // other words, 'status' corresponds to the update at top of the
+  // queue and 'latest_state' corresponds to the update at bottom of
+  // the queue.
   optional TaskState latest_state = 7;
 }
 
@@ -59,7 +70,7 @@ message StatusUpdate {
 /**
  * Encapsulates how we checkpoint a `StatusUpdate` to disk.
  *
- * See the StatusUpdateManager and slave/state.cpp.
+ * See the `TaskStatusUpdateManager` and slave/state.cpp.
  */
 message StatusUpdateRecord {
   enum Type {
@@ -266,13 +277,18 @@ message RescindInverseOfferMessage {
 
 
 /**
- * Removes all filters previously set by the scheduler.
+ * Removes filters for the specified role. If a role is not provided, then
+ * this is equivalent to passing all of the framework's subscribed roles.
  *
  * Used by the pre-Event/Call Mesos scheduler driver.
  * See scheduler::Call::Revive.
+ *
+ * NOTE: There is no `roles` field in V0 API as we will
+ * eventually move to V1 API.
  */
 message ReviveOffersMessage {
   required FrameworkID framework_id = 1;
+  repeated string roles = 2;
 }
 
 
@@ -289,6 +305,19 @@ message RunTaskMessage {
   optional FrameworkID framework_id = 1 [deprecated = true];
   required FrameworkInfo framework = 2;
   required TaskInfo task = 4;
+
+  // Used to establish the relationship between the operation and the
+  // resources that the operation is operating on. Each resource
+  // provider will keep a resource version UUID, and change it when
+  // it believes that the resources from this resource provider are
+  // out of sync from the master's view.  The master will keep track
+  // of the last known resource version UUID for each resource
+  // provider, and attach the resource version UUID in each operation
+  // it sends out. The resource provider should reject operations that
+  // have a different resource version UUID than that it maintains,
+  // because this means the operation is operating on resources that
+  // might have already been invalidated.
+  repeated ResourceVersionUUID resource_version_uuids = 5;
 
   // The pid of the framework. This was moved to 'optional' in
   // 0.24.0 to support schedulers using the HTTP API. For now, we
@@ -312,6 +341,19 @@ message RunTaskGroupMessage {
   required FrameworkInfo framework = 1;
   required ExecutorInfo executor = 2;
   required TaskGroupInfo task_group = 3;
+
+  // Used to establish the relationship between the operation and the
+  // resources that the operation is operating on. Each resource
+  // provider will keep a resource version UUID, and change it when
+  // it believes that the resources from this resource provider are
+  // out of sync from the master's view.  The master will keep track
+  // of the last known resource version UUID for each resource
+  // provider, and attach the resource version UUID in each operation
+  // it sends out. The resource provider should reject operations that
+  // have a different resource version UUID than that it maintains,
+  // because this means the operation is operating on resources that
+  // might have already been invalidated.
+  repeated ResourceVersionUUID resource_version_uuids = 4;
 }
 
 
@@ -361,6 +403,23 @@ message StatusUpdateAcknowledgementMessage {
 
 
 /**
+ * This message is used by the master to forward a framework's operation
+ * update acknowledgement to the relevant agent.
+ *
+ * See scheduler::Call::AcknowledgeOperationStatus.
+ */
+message AcknowledgeOperationStatusMessage {
+  // The UUID from the `OperationStatus` being acknowledged.
+  required UUID status_uuid = 1;
+
+  // The UUID from the relevant `Operation`.
+  required UUID operation_uuid = 2;
+
+  optional ResourceProviderID resource_provider_id = 3;
+}
+
+
+/**
  * Notifies the scheduler that the agent was lost.
  *
  * See scheduler::Event::Failure.
@@ -400,6 +459,22 @@ message ReconcileTasksMessage {
 
 
 /**
+ * The master uses this message to query an agent about the state of
+ * one or more operations. This is useful to resolve
+ * discrepancies between the master and agent's view after agent
+ * reregistration.
+ */
+message ReconcileOperationsMessage {
+  message Operation {
+    required UUID operation_uuid = 1;
+    optional ResourceProviderID resource_provider_id = 2;
+  }
+
+  repeated Operation operations = 1;
+}
+
+
+/**
  * Notifies the framework about errors during registration.
  *
  * See scheduler::Event::Error.
@@ -416,17 +491,42 @@ message FrameworkErrorMessage {
  * Failure conditions are documented inline in Master::registerSlave.
  */
 message RegisterSlaveMessage {
+  // NOTE: The `Resources` in `SlaveInfo` cannot contain reservation
+  // refinements. Therefore, `slave.resources` will always use the
+  // "pre-reservation-refinement" format.
   required SlaveInfo slave = 1;
 
   // Resources that are checkpointed by the agent (e.g., persistent
   // volume or dynamic reservation). Frameworks need to release
-  // checkpointed resources explicitly.
+  // checkpointed resources explicitly. If any of the checkpointed
+  // resources use reservation refinements, every resource in this field
+  // will be represented using the "post-reservation-refinement" format;
+  // otherwise, this field will be in "pre-reservation-refinement" format.
   repeated Resource checkpointed_resources = 3;
 
   // NOTE: This is a hack for the master to detect the agent's
   // version. If unset the agent is < 0.21.0.
   // TODO(bmahler): Do proper versioning: MESOS-986.
   optional string version = 2;
+
+  // This field allows an agent to advertise its set of
+  // capabilities (e.g., ability to launch tasks of 'multi-role'
+  // frameworks).
+  repeated SlaveInfo.Capability agent_capabilities = 4;
+
+  // Resource version UUID for agent default resources. Used to
+  // establish the relationship between the operation and the
+  // resources that the operation is operating on. Each resource
+  // provider will keep a resource version UUID, and change it when it
+  // believes that the resources from this resource provider are out
+  // of sync from the master's view.  The master will keep track of
+  // the last known resource version UUID for each resource provider,
+  // and attach the resource version UUID in each operation it sends
+  // out. The resource provider should reject operations that have a
+  // different resource version UUID than that it maintains, because
+  // this means the operation is operating on resources that might
+  // have already been invalidated.
+  optional UUID resource_version_uuid = 5;
 }
 
 
@@ -442,22 +542,50 @@ message RegisterSlaveMessage {
  * Failure conditions are documented inline in Master::reregisterSlave.
  */
 message ReregisterSlaveMessage {
+  // NOTE: The `Resources` in `SlaveInfo` cannot contain reservation
+  // refinements. Therefore, `slave.resources` will always use the
+  // "pre-reservation-refinement" format.
   required SlaveInfo slave = 2;
 
   // Resources that are checkpointed by the agent (e.g., persistent
   // volume or dynamic reservation). Frameworks need to release
-  // checkpointed resources explicitly.
+  // checkpointed resources explicitly. If any of the checkpointed
+  // resources use reservation refinements, every resource in this field
+  // will be represented using the "post-reservation-refinement" format;
+  // otherwise, this field will be in "pre-reservation-refinement" format.
   repeated Resource checkpointed_resources = 7;
 
   repeated ExecutorInfo executor_infos = 4;
   repeated Task tasks = 3;
+
+  // The `FrameworkInfo`s are provided by agents that are >= 1.0.0.
   repeated FrameworkInfo frameworks = 8;
+
   repeated Archive.Framework completed_frameworks = 5;
 
   // NOTE: This is a hack for the master to detect the agent's
   // version. If unset the agent is < 0.21.0.
   // TODO(bmahler): Do proper versioning: MESOS-986.
   optional string version = 6;
+
+  // This field allows an agent to advertise its set of
+  // capabilities (e.g., ability to launch tasks of 'multi-role'
+  // frameworks).
+  repeated SlaveInfo.Capability agent_capabilities = 9;
+
+  // Resource version UUID for agent default resources. Used to
+  // establish the relationship between the operation and the
+  // resources that the operation is operating on. Each resource
+  // provider will keep a resource version UUID, and change it when it
+  // believes that the resources from this resource provider are out
+  // of sync from the master's view.  The master will keep track of
+  // the last known resource version UUID for each resource provider,
+  // and attach the resource version UUID in each operation it sends
+  // out. The resource provider should reject operations that have a
+  // different resource version UUID than that it maintains, because
+  // this means the operation is operating on resources that might
+  // have already been invalidated.
+  optional UUID resource_version_uuid = 10;
 }
 
 
@@ -551,6 +679,9 @@ message UpdateFrameworkMessage {
 
   // See the comment on RunTaskMessage.pid.
   optional string pid = 2;
+
+  // Updated framework info.
+  optional FrameworkInfo framework_info = 3;
 }
 
 
@@ -565,13 +696,181 @@ message CheckpointResourcesMessage {
 
 
 /**
+ * Describes a resource version using a UUID. It is used to establish
+ * the relationship between an operation and the resources that
+ * operation is operating on.
+ */
+message ResourceVersionUUID {
+  // If not set, it represents resources directly from the agent (not
+  // having a backing resource provider).
+  optional ResourceProviderID resource_provider_id = 1;
+  required UUID uuid = 2;
+}
+
+
+/**
  * This message is sent by the agent to the master to inform the
  * master about the total amount of oversubscribed (allocated and
- * allocatable) resources.
+ * allocatable), or total resources. For `RESOURCE_PROVIDER` capable
+ * agents, this message also includes the operations that are either
+ * pending, or terminal but have unacknowledged status updates.
  */
 message UpdateSlaveMessage {
   required SlaveID slave_id = 1;
+
+  // Top-level fields in this message should only contain information
+  // on the agent itself; information on local resource providers is
+  // passed explicitly in the `resource_providers` message.
+  //
+  // TODO(bbannier): Consider passing agent information inside a
+  // `ResourceProvider` value as well where applicable.
+
+  // Whether to update oversubscribed resources or not. If we just use
+  // `oversubscribed_resources`, we don't have a way to tell if the
+  // intention is to update the oversubscribed resoruces to empty, or
+  // leave it unchanged. For backwards compatibility, if this field is
+  // unset (version < 1.5), we treat that as if only
+  // `oversubscribed_resources` was set.
+  optional bool update_oversubscribed_resources = 5;
   repeated Resource oversubscribed_resources = 2;
+
+  message Operations {
+    repeated Operation operations = 1;
+  }
+
+  // Pending operations or terminal operations that have
+  // unacknowledged status updates, which are known to this agent.
+  optional Operations operations = 6;
+
+  // Used to establish the relationship between the operation and the
+  // resources that the operation is operating on. Each agent will
+  // keep a resource version UUID, and change it when it believes that
+  // its resources are out of sync from the master's view. The master
+  // will keep track of the last known resource version UUID for each
+  // resource provider or agent, and attach the resource version UUID
+  // in each operation it sends out. The resource provider or agent
+  // should reject operations that have a different resource version
+  // UUID than that it maintains, because this means the operation is
+  // operating on resources that might have already been invalidated.
+  optional UUID resource_version_uuid = 7;
+
+  // Describes an agent-local resource provider.
+  message ResourceProvider {
+    optional ResourceProviderInfo info = 1;
+    repeated Resource total_resources = 2;
+    required Operations operations = 3;
+    required UUID resource_version_uuid = 4;
+  }
+
+  message ResourceProviders {
+    repeated ResourceProvider providers = 1;
+  }
+
+  // The list of all resource providers on this agent.
+  optional ResourceProviders resource_providers = 8;
+}
+
+
+/**
+ * This message is sent from the resource provider manager (either on
+ * the agent for local resource providers, or on the master for
+ * external resource providers) to update the status of an operation.
+ *
+ * See resource_provider::Call::UPDATE_OPERATION_STATUS.
+ */
+message UpdateOperationStatusMessage {
+  optional FrameworkID framework_id = 1;
+  optional SlaveID slave_id = 2;
+  required OperationStatus status = 3;
+  optional OperationStatus latest_status = 4;
+
+  // This is the internal UUID for the operation, which is kept
+  // independently from the framework-specified operation ID, which is
+  // optional.
+  required UUID operation_uuid = 5;
+}
+
+
+/**
+ * Encapsulates how we checkpoint an `UpdateOperationStatusMessage` to
+ * disk.
+ *
+ * See the `OperationStatusUpdateManager`.
+ */
+message UpdateOperationStatusRecord {
+  enum Type {
+    UPDATE = 0;
+    ACK = 1;
+  }
+
+  required Type type = 1;
+
+  // Required if type == UPDATE.
+  optional UpdateOperationStatusMessage update = 2;
+
+  // Required if type == ACK.
+  optional UUID uuid = 3;
+}
+
+
+/**
+ * This message is sent from the master to the resource provider
+ * manager (either on the agent for local resource providers, or on
+ * the master for external resource providers) to apply an operation.
+ *
+ * See resource_provider::Event::APPLY_OPERATION.
+ */
+message ApplyOperationMessage {
+  optional FrameworkID framework_id = 1;
+  required Offer.Operation operation_info = 2;
+
+  // This is the internal UUID for the operation, which is kept
+  // independently from the framework-specified operation ID, which is
+  // optional.
+  required UUID operation_uuid = 3;
+
+  // Used to establish the relationship between the operation and the
+  // resources that the operation is operating on. Each resource
+  // provider will keep a resource version UUID, and change it when
+  // it believes that the resources from this resource provider are
+  // out of sync from the master's view.  The master will keep track
+  // of the last known resource version UUID for each resource
+  // provider, and attach the resource version UUID in each operation
+  // it sends out. The resource provider should reject operations that
+  // have a different resource version UUID than that it maintains,
+  // because this means the operation is operating on resources that
+  // might have already been invalidated.
+  required ResourceVersionUUID resource_version_uuid = 4;
+}
+
+
+/**
+ * A wrapper message that is sent for a local resource provider Call
+ * by the agent to the master. The agent serves as a proxy between the
+ * local resource provider and the master.
+ */
+message ResourceProviderCallMessage {
+  required resource_provider.Call call = 1;
+
+  // This field will be set for the initial 'Subscribe' Call where the
+  // resource provider ID hasn't been assigned yet. This 'uuid' will
+  // be echoed back in the corresponding 'Subscribed' Event, allowing
+  // the agent to tell which resource provider the Event is for.
+  optional UUID uuid = 2;
+}
+
+
+/**
+ * A wrapper message that is sent for a local resource provider Event
+ * by the master to the agent. The agent serves as a proxy between the
+ * local resource provider and the master.
+ */
+message ResourceProviderEventMessage {
+  required ResourceProviderID resource_provider_id = 1;
+  required resource_provider.Event event = 2;
+
+  // See the comments in 'ResourceProviderCallMessage'.
+  optional UUID uuid = 3;
 }
 
 

@@ -17,6 +17,8 @@
 #ifndef __MASTER_VALIDATION_HPP__
 #define __MASTER_VALIDATION_HPP__
 
+#include <vector>
+
 #include <google/protobuf/repeated_field.h>
 
 #include <mesos/mesos.hpp>
@@ -26,8 +28,12 @@
 
 #include <mesos/master/master.hpp>
 
+#include <process/authenticator.hpp>
+
 #include <stout/error.hpp>
 #include <stout/option.hpp>
+
+#include "common/protobuf_utils.hpp"
 
 namespace mesos {
 namespace internal {
@@ -47,10 +53,62 @@ namespace call {
 // TODO(bmahler): Add unit tests.
 Option<Error> validate(
     const mesos::master::Call& call,
-    const Option<std::string>& principal = None());
+    const Option<process::http::authentication::Principal>& principal = None());
 
 } // namespace call {
+
+namespace message {
+
+// Validation helpers for internal Mesos protocol messages. This is a
+// best-effort validation, intended to prevent trivial attacks on the
+// protocol in deployments where the network between master and agents
+// is not secured. The longer term remedy for this is to make security
+// guarantees at the libprocess level that would prevent arbitrary UPID
+// impersonation (MESOS-7424).
+
+Option<Error> registerSlave(const RegisterSlaveMessage& message);
+Option<Error> reregisterSlave(const ReregisterSlaveMessage& message);
+
+} // namespace message {
 } // namespace master {
+
+
+namespace framework {
+namespace internal {
+
+// Validates the roles in given FrameworkInfo. Role, roles and
+// MULTI_ROLE should be set according to following matrix. Also,
+// roles should not contain duplicate entries.
+//
+// -- MULTI_ROLE is NOT set --
+// +-------+-------+---------+
+// |       |Roles  |No Roles |
+// +-------+-------+---------+
+// |Role   | Error |  None   |
+// +-------+-------+---------+
+// |No Role| Error |  None   |
+// +-------+-------+---------+
+//
+// ---- MULTI_ROLE is set ----
+// +-------+-------+---------+
+// |       |Roles  |No Roles |
+// +-------+-------+---------+
+// |Role   | Error |  Error  |
+// +-------+-------+---------+
+// |No Role| None  |  None   |
+// +-------+-------+---------+
+Option<Error> validateRoles(const mesos::FrameworkInfo& frameworkInfo);
+
+} // namespace internal {
+
+// Validate a FrameworkInfo.
+//
+// TODO(jay_guo): This currently only validates
+// the role(s), validate more fields!
+Option<Error> validate(const mesos::FrameworkInfo& frameworkInfo);
+
+} // namespace framework {
+
 
 namespace scheduler {
 namespace call {
@@ -59,12 +117,21 @@ namespace call {
 // TODO(bmahler): Add unit tests.
 Option<Error> validate(
     const mesos::scheduler::Call& call,
-    const Option<std::string>& principal = None());
+    const Option<process::http::authentication::Principal>& principal = None());
 
 } // namespace call {
 } // namespace scheduler {
 
+
 namespace resource {
+
+// Functions in this namespace are only exposed for testing.
+namespace internal {
+
+Option<Error> validateSingleResourceProvider(
+    const google::protobuf::RepeatedPtrField<Resource>& resources);
+
+} // namespace internal {
 
 // Validates resources specified by frameworks.
 // NOTE: We cannot take 'Resources' here because invalid resources are
@@ -80,10 +147,18 @@ namespace executor {
 // Functions in this namespace are only exposed for testing.
 namespace internal {
 
+Option<Error> validateExecutorID(const ExecutorInfo& executor);
+
 // Validates that fields are properly set depending on the type of the executor.
 Option<Error> validateType(const ExecutorInfo& executor);
 
+// Validates resources of the executor.
+Option<Error> validateResources(const ExecutorInfo& executor);
+
 } // namespace internal {
+
+Option<Error> validate(const ExecutorInfo& executor);
+
 } // namespace executor {
 
 
@@ -113,6 +188,9 @@ Option<Error> validateTaskAndExecutorResources(const TaskInfo& task);
 
 // Validates the kill policy of the task.
 Option<Error> validateKillPolicy(const TaskInfo& task);
+
+// Validates the check of the task.
+Option<Error> validateCheck(const TaskInfo& task);
 
 // Validates the health check of the task.
 Option<Error> validateHealthCheck(const TaskInfo& task);
@@ -184,12 +262,15 @@ namespace operation {
 // Validates the RESERVE operation.
 Option<Error> validate(
     const Offer::Operation::Reserve& reserve,
-    const Option<std::string>& principal,
-    const Option<std::string>& role);
+    const Option<process::http::authentication::Principal>& principal,
+    const protobuf::slave::Capabilities& agentCapabilities,
+    const Option<FrameworkInfo>& frameworkInfo = None());
 
 
 // Validates the UNRESERVE operation.
-Option<Error> validate(const Offer::Operation::Unreserve& unreserve);
+Option<Error> validate(
+    const Offer::Operation::Unreserve& unreserve,
+    const Option<FrameworkInfo>& frameworkInfo = None());
 
 
 // Validates the CREATE operation. We need slave's checkpointed resources so
@@ -201,7 +282,8 @@ Option<Error> validate(const Offer::Operation::Unreserve& unreserve);
 Option<Error> validate(
     const Offer::Operation::Create& create,
     const Resources& checkpointedResources,
-    const Option<std::string>& principal,
+    const Option<process::http::authentication::Principal>& principal,
+    const protobuf::slave::Capabilities& agentCapabilities,
     const Option<FrameworkInfo>& frameworkInfo = None());
 
 
@@ -213,7 +295,14 @@ Option<Error> validate(
     const Offer::Operation::Destroy& destroy,
     const Resources& checkpointedResources,
     const hashmap<FrameworkID, Resources>& usedResources,
-    const hashmap<FrameworkID, hashmap<TaskID, TaskInfo>>& pendingTasks);
+    const hashmap<FrameworkID, hashmap<TaskID, TaskInfo>>& pendingTasks,
+    const Option<FrameworkInfo>& frameworkInfo = None());
+
+
+Option<Error> validate(const Offer::Operation::CreateVolume& createVolume);
+Option<Error> validate(const Offer::Operation::DestroyVolume& destroyVolume);
+Option<Error> validate(const Offer::Operation::CreateBlock& createBlock);
+Option<Error> validate(const Offer::Operation::DestroyBlock& destroyBlock);
 
 } // namespace operation {
 

@@ -22,20 +22,26 @@
 #include <mesos/agent/agent.hpp>
 
 #include <mesos/mesos.hpp>
+#include <mesos/resources.hpp>
 
 #include <mesos/executor/executor.hpp>
 
 #include <mesos/master/master.hpp>
 
+#include <mesos/resource_provider/resource_provider.hpp>
+
 #include <mesos/scheduler/scheduler.hpp>
 
 #include <mesos/v1/mesos.hpp>
+#include <mesos/v1/resources.hpp>
 
 #include <mesos/v1/agent/agent.hpp>
 
 #include <mesos/v1/executor/executor.hpp>
 
 #include <mesos/v1/master/master.hpp>
+
+#include <mesos/v1/resource_provider/resource_provider.hpp>
 
 #include <mesos/v1/scheduler/scheduler.hpp>
 
@@ -46,6 +52,7 @@ namespace internal {
 
 // Helpers for devolving types between versions. Please add as necessary!
 CommandInfo devolve(const v1::CommandInfo& command);
+ContainerID devolve(const v1::ContainerID& containerId);
 Credential devolve(const v1::Credential& credential);
 ExecutorID devolve(const v1::ExecutorID& executorId);
 FrameworkID devolve(const v1::FrameworkID& frameworkId);
@@ -53,10 +60,18 @@ FrameworkInfo devolve(const v1::FrameworkInfo& frameworkInfo);
 HealthCheck devolve(const v1::HealthCheck& check);
 InverseOffer devolve(const v1::InverseOffer& inverseOffer);
 Offer devolve(const v1::Offer& offer);
+OperationStatus devolve(const v1::OperationStatus& status);
+Resource devolve(const v1::Resource& resource);
+ResourceProviderID devolve(const v1::ResourceProviderID& resourceProviderId);
+Resources devolve(const v1::Resources& resources);
 SlaveID devolve(const v1::AgentID& agentId);
 SlaveInfo devolve(const v1::AgentInfo& agentInfo);
 TaskID devolve(const v1::TaskID& taskId);
 TaskStatus devolve(const v1::TaskStatus& status);
+
+mesos::resource_provider::Call devolve(const v1::resource_provider::Call& call);
+mesos::resource_provider::Event devolve(
+    const v1::resource_provider::Event& event);
 
 scheduler::Call devolve(const v1::scheduler::Call& call);
 scheduler::Event devolve(const v1::scheduler::Event& event);

@@ -24,6 +24,8 @@
 
 #include <mesos/authorizer/authorizer.hpp>
 
+#include <mesos/quota/quota.hpp>
+
 #include <process/future.hpp>
 #include <process/http.hpp>
 #include <process/owned.hpp>
@@ -44,12 +46,33 @@ class Task;
 namespace internal {
 
 // Name of the default, basic authenticator.
-constexpr char DEFAULT_HTTP_AUTHENTICATOR[] = "basic";
+constexpr char DEFAULT_BASIC_HTTP_AUTHENTICATOR[] = "basic";
+
+// Name of the default, basic authenticatee.
+constexpr char DEFAULT_BASIC_HTTP_AUTHENTICATEE[] = "basic";
+
+// Name of the default, JWT authenticator.
+constexpr char DEFAULT_JWT_HTTP_AUTHENTICATOR[] = "jwt";
 
 extern hashset<std::string> AUTHORIZABLE_ENDPOINTS;
 
+
+// Contains the media types corresponding to some of the "Content-*",
+// "Accept-*" and "Message-*" prefixed request headers in our internal
+// representation.
+struct RequestMediaTypes
+{
+  ContentType content; // 'Content-Type' header.
+  ContentType accept; // 'Accept' header.
+  Option<ContentType> messageContent; // 'Message-Content-Type' header.
+  Option<ContentType> messageAccept; // 'Message-Accept' header.
+};
+
+
 // Serializes a protobuf message for transmission
 // based on the HTTP content type.
+// NOTE: For streaming `contentType`, `message` would not
+// be serialized in "Record-IO" format.
 std::string serialize(
     ContentType contentType,
     const google::protobuf::Message& message);
@@ -78,10 +101,18 @@ Try<Message> deserialize(
 
       return ::protobuf::parse<Message>(value.get());
     }
+    case ContentType::RECORDIO: {
+      return Error("Deserializing a RecordIO stream is not supported");
+    }
   }
 
   UNREACHABLE();
 }
+
+
+// Returns true if the media type can be used for
+// streaming requests/responses.
+bool streamingMediaType(ContentType contentType);
 
 
 JSON::Object model(const Resources& resources);
@@ -92,6 +123,7 @@ JSON::Object model(const ExecutorInfo& executorInfo);
 JSON::Array model(const Labels& labels);
 JSON::Object model(const Task& task);
 JSON::Object model(const FileInfo& fileInfo);
+JSON::Object model(const quota::QuotaInfo& quotaInfo);
 
 void json(JSON::ObjectWriter* writer, const Task& task);
 
@@ -104,7 +136,17 @@ void json(JSON::ArrayWriter* writer, const Labels& labels);
 void json(JSON::ObjectWriter* writer, const Resources& resources);
 void json(JSON::ObjectWriter* writer, const Task& task);
 void json(JSON::ObjectWriter* writer, const TaskStatus& status);
+void json(JSON::ObjectWriter* writer, const DomainInfo& domainInfo);
 
+namespace authorization {
+
+// Creates a subject for authorization purposes when given an authenticated
+// principal. This function accepts and returns an `Option` to make call sites
+// cleaner, since it is possible that `principal` will be `NONE`.
+const Option<authorization::Subject> createSubject(
+    const Option<process::http::authentication::Principal>& principal);
+
+} // namespace authorization {
 
 const process::http::authorization::AuthorizationCallbacks
   createAuthorizationCallbacks(Authorizer* authorizer);
@@ -119,6 +161,71 @@ public:
   {
     return true;
   }
+};
+
+
+// Determines which objects will be accepted based on authorization.
+class AuthorizationAcceptor
+{
+public:
+  static process::Future<process::Owned<AuthorizationAcceptor>> create(
+      const Option<process::http::authentication::Principal>& principal,
+      const Option<Authorizer*>& authorizer,
+      const authorization::Action& action);
+
+  template <typename... Args>
+  bool accept(Args&... args)
+  {
+    Try<bool> approved =
+      objectApprover->approved(ObjectApprover::Object(args...));
+    if (approved.isError()) {
+      LOG(WARNING) << "Error during authorization: " << approved.error();
+      return false;
+    }
+
+    return approved.get();
+  }
+
+protected:
+  // TODO(qleng): Currently, `Owned` is implemented with `shared_ptr` and allows
+  // copying. In the future, if `Owned` is implemented with `unique_ptr`, we
+  // will need to pass by rvalue reference here instead (see MESOS-5122).
+  AuthorizationAcceptor(const process::Owned<ObjectApprover>& approver)
+    : objectApprover(approver) {}
+
+  const process::Owned<ObjectApprover> objectApprover;
+};
+
+
+/**
+ * Used to filter results for API handlers. Provides the 'accept()' method to
+ * test whether the supplied ID is equal to a stored target ID. If no target
+ * ID is provided when the acceptor is constructed, it will accept all inputs.
+ */
+template <typename T>
+class IDAcceptor
+{
+public:
+  IDAcceptor(const Option<std::string>& id = None())
+  {
+    if (id.isSome()) {
+      T targetId_;
+      targetId_.set_value(id.get());
+      targetId = targetId_;
+    }
+  }
+
+  bool accept(const T& candidateId) const
+  {
+    if (targetId.isNone()) {
+      return true;
+    }
+
+    return candidateId.value() == targetId->value();
+  }
+
+protected:
+  Option<T> targetId;
 };
 
 
@@ -159,12 +266,20 @@ process::Future<bool> authorizeEndpoint(
     const std::string& endpoint,
     const std::string& method,
     const Option<Authorizer*>& authorizer,
-    const Option<std::string>& principal);
+    const Option<process::http::authentication::Principal>& principal);
 
 
 bool approveViewRole(
     const process::Owned<ObjectApprover>& rolesApprover,
     const std::string& role);
+
+// Authorizes resources in either the pre- or the post-reservation-refinement
+// formats.
+// TODO(arojas): Update this helper to only accept the
+// post-reservation-refinement format once MESOS-7851 is resolved.
+bool authorizeResource(
+    const Resource& resource,
+    const Option<process::Owned<AuthorizationAcceptor>>& acceptor);
 
 
 /**
@@ -174,6 +289,7 @@ bool approveViewRole(
  * @param realm name of the realm.
  * @param authenticatorNames a vector of authenticator names.
  * @param credentials optional credentials for BasicAuthenticator only.
+ * @param jwtSecretKey optional secret key for the JWTAuthenticator only.
  * @return nothing if authenticators are initialized and registered to
  *         libprocess successfully, or error if authenticators cannot
  *         be initialized.
@@ -181,7 +297,13 @@ bool approveViewRole(
 Try<Nothing> initializeHttpAuthenticators(
     const std::string& realm,
     const std::vector<std::string>& httpAuthenticatorNames,
-    const Option<Credentials>& credentials);
+    const Option<Credentials>& credentials = None(),
+    const Option<std::string>& jwtSecretKey = None());
+
+
+// Logs the request. Route handlers can compose this with the
+// desired request handler to get consistent request logging.
+void logRequest(const process::http::Request& request);
 
 } // namespace mesos {
 

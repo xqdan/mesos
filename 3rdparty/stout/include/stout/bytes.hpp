@@ -30,6 +30,12 @@
 class Bytes
 {
 public:
+  static constexpr uint64_t BYTES = 1;
+  static constexpr uint64_t KILOBYTES = 1024 * BYTES;
+  static constexpr uint64_t MEGABYTES = 1024 * KILOBYTES;
+  static constexpr uint64_t GIGABYTES = 1024 * MEGABYTES;
+  static constexpr uint64_t TERABYTES = 1024 * GIGABYTES;
+
   static Try<Bytes> parse(const std::string& s)
   {
     size_t index = 0;
@@ -70,13 +76,7 @@ public:
   constexpr Bytes(uint64_t bytes = 0) : value(bytes) {}
   constexpr Bytes(uint64_t _value, uint64_t _unit) : value(_value * _unit) {}
 
-  // TODO(bmahler): Consider killing kilobytes to terabyte helpers, given
-  // they implicitly lose precision if not careful.
   uint64_t bytes()     const { return value; }
-  uint64_t kilobytes() const { return value / KILOBYTES; }
-  uint64_t megabytes() const { return value / MEGABYTES; }
-  uint64_t gigabytes() const { return value / GIGABYTES; }
-  uint64_t terabytes() const { return value / TERABYTES; }
 
   bool operator<(const Bytes& that) const { return value < that.value; }
   bool operator<=(const Bytes& that) const { return value <= that.value; }
@@ -109,61 +109,50 @@ public:
     return *this;
   }
 
-protected:
-  static constexpr uint64_t BYTES = 1;
-  static constexpr uint64_t KILOBYTES = 1024 * BYTES;
-  static constexpr uint64_t MEGABYTES = 1024 * KILOBYTES;
-  static constexpr uint64_t GIGABYTES = 1024 * MEGABYTES;
-  static constexpr uint64_t TERABYTES = 1024 * GIGABYTES;
-
 private:
   uint64_t value;
 };
 
 
-class Kilobytes : public Bytes
+inline constexpr Bytes Kilobytes(uint64_t value)
 {
-public:
-  explicit constexpr Kilobytes(uint64_t value) : Bytes(value, KILOBYTES) {}
-};
+  return Bytes(value, Bytes::KILOBYTES);
+}
 
 
-class Megabytes : public Bytes
+inline constexpr Bytes Megabytes(uint64_t value)
 {
-public:
-  explicit constexpr Megabytes(uint64_t value) : Bytes(value, MEGABYTES) {}
-};
+  return Bytes(value, Bytes::MEGABYTES);
+}
 
 
-class Gigabytes : public Bytes
+inline constexpr Bytes Gigabytes(uint64_t value)
 {
-public:
-  explicit constexpr Gigabytes(uint64_t value) : Bytes(value, GIGABYTES) {}
-};
+  return Bytes(value, Bytes::GIGABYTES);
+}
 
 
-class Terabytes : public Bytes
+inline constexpr Bytes Terabytes(uint64_t value)
 {
-public:
-  explicit constexpr Terabytes(uint64_t value) : Bytes(value, TERABYTES) {}
-};
+  return Bytes(value, Bytes::TERABYTES);
+}
 
 
 inline std::ostream& operator<<(std::ostream& stream, const Bytes& bytes)
 {
   // Only raise the unit when there is no loss of information.
   if (bytes.bytes() == 0) {
+    return stream << "0B";
+  } else if (bytes.bytes() % Bytes::KILOBYTES != 0) {
     return stream << bytes.bytes() << "B";
-  } else if (bytes.bytes() % 1024 != 0) {
-    return stream << bytes.bytes() << "B";
-  } else if (bytes.kilobytes() % 1024 != 0) {
-    return stream << bytes.kilobytes() << "KB";
-  } else if (bytes.megabytes() % 1024 != 0) {
-    return stream << bytes.megabytes() << "MB";
-  } else if (bytes.gigabytes() % 1024 != 0) {
-    return stream << bytes.gigabytes() << "GB";
+  } else if (bytes.bytes() % Bytes::MEGABYTES != 0) {
+    return stream << (bytes.bytes() / Bytes::KILOBYTES) << "KB";
+  } else if (bytes.bytes() % Bytes::GIGABYTES != 0) {
+    return stream << (bytes.bytes() / Bytes::MEGABYTES) << "MB";
+  } else if (bytes.bytes() % Bytes::TERABYTES != 0) {
+    return stream << (bytes.bytes() / Bytes::GIGABYTES) << "GB";
   } else {
-    return stream << bytes.terabytes() << "TB";
+    return stream << (bytes.bytes() / Bytes::TERABYTES) << "TB";
   }
 }
 
